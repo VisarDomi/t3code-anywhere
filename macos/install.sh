@@ -1,16 +1,17 @@
 #!/bin/sh
 # macOS setup, as the logged-in user (uses sudo). Safe to run again.
-#   sh macos/install.sh                      # t3code-keepalive LaunchAgent
-#   sh macos/install.sh --wifi-home-address  # also: fixed Wi-Fi address only at home
-#                                            # (run at home, with the fixed address set)
+#   sh macos/install.sh                 # t3code-keepalive LaunchAgent
+#   sh macos/install.sh --home-network  # also, for a laptop (run at home): T3 reachable on
+#                                       # the LAN only at home, and a fixed home Wi-Fi
+#                                       # address kept only at home (see macos/home-network)
 # Also gives a tailscaled built from source (macos/build-tailscaled.sh) KeepAlive.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 uid=$(id -u)
-wifi=no
+home_network=no
 for arg in "$@"; do
     case $arg in
-        --wifi-home-address) wifi=yes ;;
+        --home-network) home_network=yes ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done
@@ -68,41 +69,47 @@ if [ -x /usr/local/bin/tailscaled ] && [ -f /Library/LaunchDaemons/com.tailscale
 </plist>' /Library/LaunchDaemons/com.tailscale.tailscaled.plist root
 fi
 
-if [ "$wifi" = yes ]; then
+if [ "$home_network" = yes ]; then
+    # The router of the network the Mac is on now, which must be home.
+    router=$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2}')
+    ping -c 1 -t 1 "$router" >/dev/null 2>&1 || true
+    router_mac=$(arp -an | awk -v r="($router)" '$2 == r && $3 == "at" {print $4; exit}')
+    [ -n "$router" ] && [ -n "$router_mac" ] ||
+        { echo "Could not read the home router (connected at home?): router=$router mac=$router_mac" >&2; exit 1; }
+    conf="ROUTER=$router
+ROUTER_MAC=$router_mac
+T3_LAN=yes"
+    # A fixed address on the Wi-Fi service: keep it only at home.
     iface=$(networksetup -listallhardwareports | awk '/^Hardware Port: Wi-Fi$/ {getline; print $2}')
     service=$(networksetup -listnetworkserviceorder |
         awk -v dev="$iface" '/^\([0-9*]+\) / {sub(/^\([0-9*]+\) /, ""); name=$0}
                              index($0, "Device: " dev ")") {print name; exit}')
-    info=$(networksetup -getinfo "$service")
-    home_ip=$(printf '%s\n' "$info" | sed -n 's/^IP address: //p' | head -1)
-    router=$(netstat -rn -f inet | awk -v i="$iface" '$1 == "default" && $NF == i {print $2; exit}')
-    [ -n "$router" ] || router=$(ipconfig getoption "$iface" router 2>/dev/null || true)
-    ping -c 1 -t 1 -b "$iface" "$router" >/dev/null 2>&1 || true
-    router_mac=$(arp -n -i "$iface" "$router" 2>/dev/null | awk '$3 == "at" {print $4}')
+    info=$( [ -n "$service" ] && networksetup -getinfo "$service" || true)
     case "$(printf '%s\n' "$info" | head -1)" in
-        Manual*) ;;
-        *) echo "The Wi-Fi service \"$service\" has no fixed address; nothing to do." >&2; exit 1 ;;
+        Manual*)
+            home_ip=$(printf '%s\n' "$info" | sed -n 's/^IP address: //p' | head -1)
+            conf="$conf
+SERVICE=\"$service\"
+IFACE=$iface
+HOME_IP=$home_ip" ;;
     esac
-    [ -n "$iface" ] && [ -n "$home_ip" ] && [ -n "$router" ] && [ -n "$router_mac" ] ||
-        { echo "Could not read the home network (on Wi-Fi at home?): iface=$iface ip=$home_ip router=$router mac=$router_mac" >&2; exit 1; }
-    printf 'SERVICE="%s"\nIFACE=%s\nHOME_IP=%s\nROUTER=%s\nROUTER_MAC=%s\n' \
-        "$service" "$iface" "$home_ip" "$router" "$router_mac" |
-        sudo tee /usr/local/etc/wifi-home-address.conf >/dev/null
-    sudo install -o root -g wheel -m 755 "$here/wifi-home-address" /usr/local/libexec/wifi-home-address
-    install_job system local.wifi-home-address '<?xml version="1.0" encoding="UTF-8"?>
+    printf '%s\n' "$conf" | sudo tee /usr/local/etc/home-network.conf >/dev/null
+    sudo install -o root -g wheel -m 755 "$here/home-network" /usr/local/libexec/home-network
+    install_job system local.home-network '<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>local.wifi-home-address</string>
-  <key>ProgramArguments</key><array><string>/usr/local/libexec/wifi-home-address</string></array>
+  <key>Label</key><string>local.home-network</string>
+  <key>ProgramArguments</key><array><string>/usr/local/libexec/home-network</string></array>
   <key>StartInterval</key><integer>10</integer>
   <key>RunAtLoad</key><true/>
 </dict>
-</plist>' /Library/LaunchDaemons/local.wifi-home-address.plist root
-    echo "Wi-Fi: $service ($iface) keeps $home_ip at home (router $router, $router_mac), DHCP elsewhere."
+</plist>' /Library/LaunchDaemons/local.home-network.plist root
+    echo "Home network: router $router ($router_mac); T3 reachable on the LAN only at home$(
+        [ -n "${home_ip:-}" ] && echo "; Wi-Fi $service ($iface) fixed at $home_ip only at home")."
 fi
 
-for job in "gui/$uid/local.t3code-keepalive" system/com.tailscale.tailscaled system/local.wifi-home-address; do
+for job in "gui/$uid/local.t3code-keepalive" system/com.tailscale.tailscaled system/local.home-network; do
     sudo launchctl print "$job" >/dev/null 2>&1 || continue
     printf '%s: ' "$job"
     sudo launchctl print "$job" | awk '/^\tstate = /{s=$3} END{print s}'

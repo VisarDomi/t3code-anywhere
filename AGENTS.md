@@ -15,9 +15,13 @@ app drives all of them. Everything travels over the owner's own Tailscale networ
 - **T3's own settings do the networking** (Settings → Connections):
   - **Tailscale HTTPS: on.** T3 runs `tailscale serve --bg --https=443
     http://127.0.0.1:<port>` when it starts and removes it when it quits.
-  - **Network access: off** on laptops: on, T3 listens on 0.0.0.0, reachable from
-    whatever Wi-Fi the laptop is on (pairing still required). Owner's choice on a
-    desktop that stays home.
+  - **Network access** lets devices on the same LAN connect without Tailscale: T3 then
+    listens on 0.0.0.0, and clients learn each computer's LAN address as a route of
+    its own, tried before Tailscale. A phone can then keep Tailscale off at home and
+    on elsewhere. On a desktop that stays home it is safe to leave on. On a laptop it
+    would also open T3 to every Wi-Fi it joins: there, either leave it off, or turn it
+    on together with `macos/install.sh --home-network`, which keeps T3's port closed
+    to the LAN everywhere except at home.
   - **Pairing**: each client (desktop or phone) pairs once per computer with a one-time
     link; routes, reconnection and updates of the other computer are then T3's job.
 - **[`t3code-keepalive`](t3code-keepalive)** (Linux and macOS) covers what T3 does not:
@@ -34,7 +38,7 @@ Optional pieces, each only when it applies:
 
 | Piece | When |
 | --- | --- |
-| [`macos/install.sh --wifi-home-address`](macos/wifi-home-address) | A laptop with a fixed IP address at home: macOS applies it on every network, so the laptop is offline elsewhere. It keeps the address only on the home network (recognised by the router's MAC) and uses DHCP elsewhere. |
+| [`macos/install.sh --home-network`](macos/home-network) | A Mac laptop. Home is recognised by the router's MAC address. T3's port is reachable on the LAN only at home (the packet filter closes it elsewhere; Tailscale always passes), so Network access can stay on. A fixed home IP address, if the Wi-Fi has one, is kept only at home (macOS would apply it on every network and leave the laptop offline elsewhere); DHCP elsewhere. |
 | [`macos/build-tailscaled.sh`](macos/build-tailscaled.sh) | A Mac where nobody can click the Tailscale app's prompts (set up over SSH), or that must be on the tailnet before anyone logs in. |
 | [`tools/keyring-blank-password`](tools/keyring-blank-password) | A Linux desktop that logs in automatically: nothing unlocks the GNOME keyring, so T3 asks for its password after every login. |
 | [`tools/tailscale-api.sh`](tools/tailscale-api.sh) | The owner prefers giving you a short-lived API token to clicking in the Tailscale admin console. |
@@ -56,8 +60,9 @@ pairing); the scripts here are for Linux and macOS.
    the admin console, or give you a 1-day API access token instead?
 5. Linux: can you run `sudo`, or will they run one command per computer? Does the
    computer log in automatically?
-6. Laptops: a fixed IP address at home? (Then the Wi-Fi piece.)
-7. Desktops that stay home: should T3 also be reachable on the home LAN (Network access)?
+6. At home, should devices reach each other without Tailscale (for example a phone that
+   keeps Tailscale off at home)? Then Network access goes on, and Mac laptops get the
+   home-network piece. Does a laptop use a fixed IP address at home?
 
 ## 2. Ground rules
 
@@ -136,14 +141,16 @@ mapping). The watcher and `linux/install.sh` do not apply there.
    (notarized; team ARK85ZXQ4Z); copy it to `/Applications`. The owner finishes T3's
    first-run screens.
 3. `sh macos/install.sh` (sudo): the watcher LaunchAgent, which starts T3, and
-   KeepAlive for a source-built tailscaled. A laptop with a fixed home IP: run
-   `sh macos/install.sh --wifi-home-address` at home, on that Wi-Fi.
+   KeepAlive for a source-built tailscaled. A laptop: `sh macos/install.sh
+   --home-network`, run at home (it records the router, and a fixed Wi-Fi address if
+   the Wi-Fi service has one).
 
 ## 6. T3 Code settings, on each computer
 
 - Settings → Connections → **Tailscale HTTPS: on** (or `"tailscaleServeEnabled": true`
   in the settings file, with T3 quit).
-- **Network access**: off on laptops; the owner's choice on home desktops.
+- **Network access**: on where devices should meet on the home LAN without Tailscale
+  (Mac laptops only together with `--home-network`); otherwise off.
 - Settings → General → **Update track**: the same everywhere.
 - **Continue threads after restarts**: on (the default).
 
@@ -189,7 +196,11 @@ work (below), and where this runbook is. Delete secrets and revoke the API token
 - **Restarts**: interrupted threads continue (Continue threads after restarts). The
   watcher restarts T3 after a crash or kill, never after Quit.
 - **Away from home**: the laptop joins any Wi-Fi; Tailscale reconnects and other devices
-  reach it at its tailnet name.
+  reach it at its tailnet name. With `--home-network`, its T3 is closed to that Wi-Fi.
+- **The phone**: with Network access on, Tailscale can stay off at home (the app uses
+  each computer's LAN route) and goes on when out. A route the app has not seen yet is
+  learned while connected, so connect once with Tailscale on after turning Network
+  access on.
 - **New device**: Tailscale on the same account, key expiry off, pair it (step 7).
 - **Phone notifications** (agent finished, needs approval) need T3 Connect (sign in,
   link the environments, enable Device Notifications in the phone app); a Tailscale

@@ -1,0 +1,72 @@
+#!/bin/sh
+# Treats a laptop differently at home and elsewhere. Home is recognised by the router's
+# MAC address, so a foreign network that reuses the same router address is "away".
+# Runs as root every 10 s (LaunchDaemon local.home-network) with settings from
+# /usr/local/etc/home-network.conf, written by `macos/install.sh --home-network` at home:
+#
+#   ROUTER=192.168.1.1  ROUTER_MAC=aa:b:cc:dd:e:ff   (as `arp` prints it, no leading zeros)
+#   T3_LAN=yes          T3 Code's port is reachable on the LAN only at home: with T3's
+#                       Network access on, phones and computers at home connect without
+#                       Tailscale, while other networks (a coffee shop's Wi-Fi) are kept
+#                       out by the packet filter. Tailscale and loopback (where Tailscale
+#                       Serve delivers) always pass. Closed until home is confirmed.
+#   SERVICE=Wi-Fi IFACE=en0 HOME_IP=192.168.1.50
+#                       A fixed Wi-Fi address only at home, DHCP elsewhere: macOS applies
+#                       a service's address on every network, so a laptop with a fixed
+#                       home address would be offline anywhere else.
+
+conf=/usr/local/etc/home-network.conf
+[ -r "$conf" ] || exit 0
+# shellcheck source=/dev/null
+. "$conf"
+GRACE=30                               # seconds away before the Wi-Fi switches to DHCP
+MISS=/var/run/home-network.miss
+ANCHOR=com.apple/local.t3code-lan      # evaluated by macOS's default `anchor "com.apple/*"`
+PORTS=3773:3799                        # T3 starts at 3773 and moves up when it is taken
+
+log() { logger -t home-network "$*"; }
+
+# Home: the router answers now, and with its known MAC address.
+ping -c 1 -t 1 "$ROUTER" >/dev/null 2>&1 &&
+    arp -an | awk -v r="($ROUTER)" '$2 == r && $3 == "at" {print $4}' | grep -qx "$ROUTER_MAC" &&
+    home=yes || home=no
+
+if [ "${T3_LAN:-no}" = yes ]; then
+    pfctl -s info 2>/dev/null | grep -q 'Status: Enabled' || pfctl -E >/dev/null 2>&1
+    pfctl -a "$ANCHOR" -s rules 2>/dev/null | grep -q '^block' && closed=yes || closed=no
+    if [ "$home" = yes ] && [ "$closed" = yes ]; then
+        pfctl -a "$ANCHOR" -F rules >/dev/null 2>&1 && log "home: T3 Code reachable on the LAN"
+    elif [ "$home" = no ] && [ "$closed" = no ]; then
+        printf '%s\n' \
+            "pass in quick on lo0 proto tcp to any port $PORTS" \
+            "pass in quick proto tcp from any to { 100.64.0.0/10, fd7a:115c:a1e0::/48 } port $PORTS" \
+            "block drop in quick proto tcp to any port $PORTS" |
+            pfctl -a "$ANCHOR" -f - >/dev/null 2>&1 && log "away: T3 Code closed to the LAN"
+    fi
+fi
+
+[ -n "${HOME_IP:-}" ] || exit 0
+ifconfig "$IFACE" 2>/dev/null | grep -q 'status: active' || { rm -f "$MISS"; exit 0; }
+mode=$(networksetup -getinfo "$SERVICE" | head -1)
+ping -c 1 -t 1 -b "$IFACE" "$ROUTER" >/dev/null 2>&1    # refresh the ARP entry over Wi-Fi
+mac=$(arp -n -i "$IFACE" "$ROUTER" 2>/dev/null | awk '$3 == "at" {print $4}')
+if [ "$mac" = "$ROUTER_MAC" ]; then
+    rm -f "$MISS"
+    case "$mode" in
+        Manual*) ;;
+        *) networksetup -setmanualwithdhcprouter "$SERVICE" "$HOME_IP" &&
+               log "home: Wi-Fi fixed at $HOME_IP" ;;
+    esac
+    exit 0
+fi
+case "$mode" in
+    Manual*)
+        now=$(date +%s)
+        [ -f "$MISS" ] || echo "$now" > "$MISS"
+        if [ $((now - $(cat "$MISS"))) -ge "$GRACE" ]; then
+            networksetup -setdhcp "$SERVICE" && log "away: Wi-Fi on DHCP"
+            rm -f "$MISS"
+        fi
+        ;;
+    *) rm -f "$MISS" ;;
+esac

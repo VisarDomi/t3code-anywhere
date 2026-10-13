@@ -6,9 +6,9 @@ home or from a coffee shop; from your phone, drive both. It runs over your own p
 [Tailscale](https://tailscale.com) network, so nothing is opened to the internet or to
 the Wi-Fi you happen to be on.
 
-It also keeps T3 Code running: it starts at login, comes back after a crash, updates
-without passwords, and a laptop with a fixed home IP address still gets online
-elsewhere.
+It also keeps T3 Code running: it starts at login, comes back after a crash and updates
+without passwords. At home your devices can also meet on the LAN, so the phone needs
+Tailscale only when you are out, while a laptop stays closed to coffee-shop Wi-Fi.
 
 ## How to use it
 
@@ -37,5 +37,5 @@ and pairing) without the helper scripts.
 | [AGENTS.md](AGENTS.md) | The runbook the agent follows |
 | [t3code-keepalive](t3code-keepalive) | Starts T3 at login, restarts it after a crash, finishes its Tailscale HTTPS after an offline boot |
 | [linux/](linux) | `install-root.sh` (once, with sudo) and `install.sh` (T3 Code AppImage, menu entry, watcher) |
-| [macos/](macos) | `install.sh` (watcher; optional home-only Wi-Fi address) and `build-tailscaled.sh` |
+| [macos/](macos) | `install.sh` (watcher; for laptops, LAN access and a fixed address only at home) and `build-tailscaled.sh` |
 | [tools/](tools) | Tailscale admin through its API, pairing without a screen, Linux keyring without a password |
