@@ -1,0 +1,115 @@
+#!/bin/sh
+# t3code-keepalive: keeps the T3 Code desktop app running on Linux and macOS.
+#
+# - Starts T3 Code at login (run from XDG autostart on Linux, a LaunchAgent on macOS).
+# - Relaunches it when it dies without being quit (crash, kill, out of memory),
+#   however it was started: login, menu or Dock, or the relaunch after an update.
+#   A normal Quit is respected: T3 deletes <T3 home>/userdata/server-runtime.json when
+#   it quits, so that file outliving the app means it did not quit.
+# - A killed desktop leaves its backend running, still holding the port and the
+#   database; that backend is stopped first, so two servers never share the database.
+# - Completes T3's Settings → Connections → Tailscale HTTPS, which runs `tailscale serve`
+#   only once, as T3 starts: after a boot while offline, T3 is published the same way
+#   once Tailscale is connected.
+#
+# Settings (environment): T3CODE_HOME (default ~/.t3), T3CODE_APP (Linux: the app to
+# start; default ~/Applications/T3-Code.AppImage, then /usr/bin/t3code).
+
+userdata="${T3CODE_HOME:-$HOME/.t3}/userdata"
+runtime="$userdata/server-runtime.json"
+desktop_settings="$userdata/desktop-settings.json"
+# The App Store Tailscale app's binary is also its CLI; this keeps it from opening a window.
+export TAILSCALE_BE_CLI=1
+tailscale=$(command -v tailscale ||
+    for t in /usr/local/bin/tailscale /opt/homebrew/bin/tailscale \
+        /Applications/Tailscale.app/Contents/MacOS/Tailscale; do
+        [ -x "$t" ] && echo "$t" && break
+    done)
+
+# One watcher per user. launchd guarantees that on macOS; on Linux a watcher left from
+# an earlier session would otherwise run alongside the new one. Waits briefly: a
+# just-stopped watcher's `sleep` still holds the lock for up to 10 s.
+if command -v flock >/dev/null; then
+    exec 9>"${XDG_RUNTIME_DIR:-/tmp}/t3code-keepalive.lock"
+    flock -w 15 9 || exit 0
+fi
+
+app_running() {
+    if [ "$(uname)" = Darwin ]; then
+        [ -n "$(lsappinfo find bundleid=com.t3tools.t3code)" ]
+    else
+        # The main process is the t3code process that is neither a Chromium helper
+        # (--type=) nor the backend (bin.mjs).
+        for pid in $(pgrep -u "$(id -u)" -x t3code); do
+            tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qE -- '--type=|bin\.mjs' || return 0
+        done
+        return 1
+    fi
+}
+
+launch() {
+    if [ "$(uname)" = Darwin ]; then
+        open -g -b com.t3tools.t3code
+    else
+        app=${T3CODE_APP:-$HOME/Applications/T3-Code.AppImage}
+        [ -x "$app" ] || app=/usr/bin/t3code
+        # 9>&-: the app must not inherit the watcher's lock.
+        setsid "$app" >/dev/null 2>&1 </dev/null 9>&- &
+    fi
+}
+
+# Stops the backend a killed app left behind. Its pid comes from the runtime file and
+# must still be a T3 server process.
+stop_orphan() {
+    pid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$runtime" 2>/dev/null)
+    [ -n "$pid" ] && ps -o command= -p "$pid" 2>/dev/null | grep -q 'apps/server/dist/bin\.mjs' || return 0
+    kill -TERM "$pid"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 1
+    done
+    kill -KILL "$pid"
+    rm -f "$runtime"
+}
+
+# With Tailscale HTTPS on and Tailscale connected, publish T3 if it is not published.
+# Waits 30 s first, so it never races T3's own setup; does nothing with the setting off.
+unserved=0
+repair_serve() {
+    [ -n "$tailscale" ] || return 0
+    grep -q '"tailscaleServeEnabled": *true' "$desktop_settings" 2>/dev/null || return 0
+    port=$(sed -n 's/.*"port":\([0-9][0-9]*\).*/\1/p' "$runtime" 2>/dev/null)
+    [ -n "$port" ] || return 0
+    target="http://127.0.0.1:$port"
+    if "$tailscale" serve status --json 2>/dev/null | grep -q "\"Proxy\": *\"$target\""; then
+        unserved=0
+        return 0
+    fi
+    "$tailscale" status --json --peers=false 2>/dev/null | grep -q '"BackendState": *"Running"' || return 0
+    unserved=$((unserved + 1))
+    [ "$unserved" -ge 3 ] || return 0
+    https=$(sed -n 's/.*"tailscaleServePort": *\([0-9][0-9]*\).*/\1/p' "$desktop_settings")
+    "$tailscale" serve --bg --yes --https="${https:-443}" "$target" >/dev/null 2>&1 && unserved=0
+}
+
+app_running || { stop_orphan; launch; }
+gone=0
+while sleep 10; do
+    if app_running; then
+        gone=0
+        repair_serve
+        continue
+    fi
+    unserved=0
+    if [ ! -f "$runtime" ]; then
+        gone=0
+        continue
+    fi
+    # Two checks in a row, so a quit that is still finishing is not mistaken for a crash.
+    gone=$((gone + 1))
+    [ "$gone" -ge 2 ] || continue
+    stop_orphan
+    launch
+    gone=0
+    sleep 20
+done
