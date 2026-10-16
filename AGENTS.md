@@ -187,7 +187,12 @@ carries the permissions of the version that issued it):
 - **A desktop app**: Settings → Connections → **Add environment**, the link in the Host
   field. Without anyone at the screen: [`tools/add-environment.mjs`](tools/add-environment.mjs).
 - **The phone**: Tailscale on, then scan a QR code of the link in the T3 app
-  (`python3 -c 'import qrcode, sys; qrcode.make(sys.argv[1]).save("pair.png")' <link>`).
+  (read the CLI's private JSON file, keeping the code out of process arguments):
+
+  ```sh
+  python3 -c 'import json,qrcode,sys; qrcode.make(json.load(sys.stdin)["pairUrl"]).save("/path/to/private-pair.png")' < /path/to/private-pairing.json
+  ```
+
   Then, at home, add explicitly saved home LAN routes to that same environment
   through **Routes → Add route**, using fresh pairing links with each fixed LAN
   address as `--base-url`. Include Wi-Fi and Ethernet if both must work separately,
