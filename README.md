@@ -7,8 +7,11 @@ home or from a coffee shop; from your phone, drive both. It runs over your own p
 the Wi-Fi you happen to be on.
 
 It also keeps T3 Code running: it starts at login, comes back after a crash and updates
-without passwords. At home your devices can also meet on the LAN, so the phone needs
-Tailscale only when you are out, while a laptop stays closed to coffee-shop Wi-Fi.
+without passwords. Keep Tailscale connected on every device, including a phone at
+home: the laptop may be elsewhere. On iOS, VPN On Demand connects it automatically
+on both Wi-Fi and cellular. Home LAN routes are optional shortcuts; the permanent
+Tailscale address works across networks while the laptop stays closed to coffee-shop
+Wi-Fi. See [roaming and stale LAN routes](ROAMING.md).
 
 ## How to use it
 
@@ -35,6 +38,7 @@ and pairing) without the helper scripts.
 | | |
 | --- | --- |
 | [AGENTS.md](AGENTS.md) | The runbook the agent follows |
+| [ROAMING.md](ROAMING.md) | Automatic home/away connections, phone VPN On Demand, and recovery from stale LAN routes |
 | [t3code-keepalive](t3code-keepalive) | Starts T3 at login, restarts it after a crash, finishes its Tailscale HTTPS after an offline boot |
 | [linux/](linux) | `install-root.sh` (once, with sudo) and `install.sh` (T3 Code AppImage, menu entry, watcher) |
 | [macos/](macos) | `install.sh` (watcher; for laptops, LAN access and a fixed address only at home) and `build-tailscaled.sh` |
