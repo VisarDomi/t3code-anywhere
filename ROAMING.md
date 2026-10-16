@@ -1,92 +1,99 @@
-# Connections that survive changing networks
+# Home LAN and coffee-shop Tailscale
 
-Use a permanent Tailscale HTTPS route for each computer and keep Tailscale connected
-on every device. A fixed home LAN address and a permanent tailnet address serve
-different purposes: the home address works only on that home network; the tailnet
-name continues to reach the computer after it moves.
+The daily routine is one phone toggle: **Tailscale off at home, on at coffee**.
+Save both home LAN routes and a Tailscale HTTPS route for each computer. The
+computers keep their Tailscale services running for remote access; home traffic
+uses LAN routes and the phone does not need its VPN at home.
 
-## One-time phone setup
+## Supported cases
 
-1. Pair each computer using `https://<name>.<tailnet>.ts.net/`, as in the runbook.
-   In T3's environment details, verify that HTTPS route is saved without the label
-   "found automatically". Keep an existing valid pairing; do not delete it just
-   because a LAN route times out.
-2. In the Tailscale iOS app, open profile/settings → **VPN On Demand**, enable it,
-   and set **Wi-Fi: Always** and **Cellular: Always**. Do not exclude home Wi-Fi.
-   Connect Tailscale. These are the [documented connection rules](https://tailscale.com/docs/features/client/ios-vpn-on-demand).
-3. Leave Tailscale connected on both computers, with T3's **Tailscale HTTPS** on.
-   No exit node is required. Complete a coffee shop's Wi-Fi sign-in when needed.
+| Desktop | Laptop | Phone | Phone VPN | Connections |
+| --- | --- | --- | --- | --- |
+| Home | Home | Home | Off | Phone to both computers over LAN; computers use LAN |
+| Home | Home | Coffee | On | Phone to both over Tailscale; computers can use LAN |
+| Home | Coffee | Coffee | On | Phone to both and laptop to desktop over Tailscale |
 
-The phone needs Tailscale when either endpoint is away. A rule that turns it off
-whenever the phone is home cannot reach a laptop at a coffee shop. There is no
-phone URL change when moving between these cases:
+The phone and laptop can be on different outside networks in the last case.
+**Phone home / laptop away is outside this workflow.** Do not add a relay or
+require the phone's VPN at home to cover a case the owner excluded.
 
-| Desktop | Laptop | Phone | Connection available |
-| --- | --- | --- | --- |
-| Home | Home | Home | Tailscale; current LAN shortcuts may also work |
-| Home | Away | Home | Tailscale to both computers |
-| Home | Home | Away | Tailscale to both computers |
-| Home | Away | Away | Tailscale to both computers, even on different networks |
+Hosts must be awake with T3 running. Outside networks need working internet,
+including any Wi-Fi sign-in. Keep every device on compatible T3 versions and the
+same tailnet, with valid pairings. Network and host failures can still interrupt
+connections; this policy removes recurring route edits and pairing from travel.
 
-Each device needs working internet, the same tailnet, a valid pairing and compatible
-T3 versions; host computers must be awake with T3 running. These are setup
-requirements, not a claim that every physical network transition was tested.
+## One-time saved routes
 
-## Why an unfamiliar LAN address can appear
+For every client that must work locally without its VPN, including the phone:
 
-T3's server reports private IPv4 addresses from its current network interfaces.
-With Network access on, clients learn these as routes marked **found automatically**.
-They can include a laptop's DHCP address on another Wi-Fi network. That does not
-change its configured static home address, nor does it make the foreign address
-reachable from home.
+1. Keep its existing saved `https://<name>.<tailnet>.ts.net/` route. If setting up
+   from scratch, pair through that name with Tailscale on first.
+2. At home, create a new pairing link on each host for each fixed LAN address:
 
-Learned routes are a snapshot, not a permanent address book. When the server reports
-a different set, T3 drops learned routes missing from that set. After a laptop
-travels, the phone can therefore retain a foreign LAN address and no home LAN
-address until its next successful connection. If Tailscale is disconnected, none
-of the remaining routes may work, so the phone cannot learn the home address again.
+   ```sh
+   ~/.t3/bin/t3 auth pairing create --base-url http://<fixed-home-ip>:<t3-port> \
+     --label phone-home --ttl 7d --json </dev/null
+   ```
 
-This behavior is explicit in T3 version `0.0.46-nightly.20261013.3053`:
-[server address discovery](https://github.com/pingdotgg/t3code/blob/6524a8d43795dc543f7cfb572388cdea3662ad48/apps/server/src/environment/DirectEndpoints.ts),
-[route merging](https://github.com/pingdotgg/t3code/blob/6524a8d43795dc543f7cfb572388cdea3662ad48/packages/client-runtime/src/connection/routes.ts), and
-[tests for replacing learned addresses and retaining saved routes](https://github.com/pingdotgg/t3code/blob/6524a8d43795dc543f7cfb572388cdea3662ad48/packages/client-runtime/src/connection/routes.test.ts).
+   Treat the resulting link/code as a secret. Keep it out of repositories and
+   command-line arguments; show the owner its QR code for pairing. Generate a
+   separate single-use link per route and client.
+3. On the phone, open the existing environment → **Routes → Add route** and scan
+   its home-route QR code. This adds a route to the same machine, preserving the
+   environment, threads and existing HTTPS route. Include each fixed home Wi-Fi
+   and Ethernet address that must work independently, plus the desktop's fixed
+   address. The interface being added must be connected and reachable during
+   pairing; a QR code cannot pair an unplugged Ethernet interface.
+4. Verify that the added LAN routes are **not** labelled "found automatically".
+   Keep the LAN routes ahead of the HTTPS route; Wi-Fi first is suitable when the
+   cable is optional. Adding a route normally inserts it ahead of Tailscale.
+5. Turn the phone's Tailscale **off**. Confirm both computers connect, including
+   with the laptop cable disconnected. Turn it **on** when leaving for coffee.
+   Returning home requires only turning it off again, not editing a URL.
+
+Do not replace an environment's displayed URL as the default repair. In the T3
+version inspected, that edits the first direct route and requires that route's
+own saved credential; a learned route can borrow another route's credential.
+**Add route** creates a saved route with its own credential and retains the
+existing Tailscale route. Do not delete the environment or its working HTTPS
+route. Delete consumed QR/link files after verifying successful pairing; revoke
+unused pairing codes when abandoning setup.
+
+The computer's fixed home address must itself be stable. A laptop keeps its home
+Wi-Fi address only at home and uses DHCP elsewhere. On Mac laptops, Network access
+must be combined with the home-network firewall helper, which blocks the T3 port
+on foreign LANs while allowing Tailscale. Do not apply a home IP at a coffee shop
+or open T3 to foreign Wi-Fi to repair a stale client route.
+
+## Why automatic discovery is insufficient
+
+T3 reports its current private interface addresses, and clients add them as routes
+marked **found automatically**. A foreign DHCP address can therefore appear on a
+phone without changing the laptop's configured static home address. These learned
+routes are replaced when the server reports a new set. An old home address can
+vanish, and the phone cannot relearn it while none of its remaining routes work.
+
+Explicitly saved routes survive changes in the server's reports. Merely learning
+or reordering a route does not make it permanent. Saving all required fixed home
+routes alongside HTTPS prevents this dependency on the last visited network.
+
+Source references for T3 `0.0.46-nightly.20261013.3053`:
+[interface discovery](https://github.com/pingdotgg/t3code/blob/6524a8d43795dc543f7cfb572388cdea3662ad48/apps/server/src/environment/DirectEndpoints.ts),
+[route retention](https://github.com/pingdotgg/t3code/blob/6524a8d43795dc543f7cfb572388cdea3662ad48/packages/client-runtime/src/connection/routes.ts),
+[route tests](https://github.com/pingdotgg/t3code/blob/6524a8d43795dc543f7cfb572388cdea3662ad48/packages/client-runtime/src/connection/routes.test.ts), and
+[pairing and URL editing](https://github.com/pingdotgg/t3code/blob/6524a8d43795dc543f7cfb572388cdea3662ad48/packages/client-runtime/src/connection/onboarding.ts).
 Recheck these behaviors after relevant T3 updates.
 
-## Recovering a phone with a stale LAN route
+## Verify and hand over
 
-If the permanent Tailscale HTTPS route is already saved, connect Tailscale and let
-T3 retry (or tap its reconnect button). The successful connection lets T3 learn the
-computer's current LAN routes. **Do not replace the environment URL with today's
-LAN address as the roaming fix.** That fixes only the current network.
-
-If the HTTPS route is absent or itself marked "found automatically", add a saved
-route using a new pairing link whose base URL is the permanent HTTPS name. Keep
-the existing environment; T3's **Routes → Add route** pairs another route to it.
-Do not remove the working saved route or its credential.
-
-## Optional local access with Tailscale deliberately off
-
-This is optional and only covers devices on the same home LAN. If the owner needs
-it to survive a laptop's travel, explicitly add saved routes for each fixed home
-interface address using **Add route** and pairing links for those addresses.
-Verify they are not marked "found automatically". User-saved routes survive changes
-in the server's reported addresses; merely learning or reordering a route does not
-make it permanent. Preserve the Tailscale HTTPS route as well.
-
-Keep a laptop's static Wi-Fi address restricted to its home network and DHCP
-elsewhere, using the home-network helper. Do not apply the home address at a coffee
-shop, alias a stale foreign address onto the home interface, or open the laptop's
-T3 port to foreign Wi-Fi to repair a client route.
-
-## Verify before calling the setup complete
-
-- From the other computer, fetch each host's
-  `https://<name>.<tailnet>.ts.net/.well-known/t3/environment` and check its identity
-  and protocol version. Confirm Serve still targets the active backend port.
-- On the phone, confirm each environment connects with Tailscale on and its
-  permanent HTTPS route retained. Then check phone cellular, laptop away, and the
-  return home when those physical transitions are available. Do not claim these
-  phone tests passed based only on computer-to-computer requests.
-- If local access without Tailscale was requested, verify the explicitly saved
-  home routes, including with the cable disconnected, rather than relying on the
-  current learned route list.
+- Check home LAN and Tailscale HTTPS discovery endpoints from the other computer,
+  verifying the environment identity and protocol version. Confirm Serve targets
+  the active backend port. Confirm saved LAN routes on the computer clients too;
+  do not confuse LAN traffic inside Tailscale with a direct LAN route.
+- Have the owner confirm the phone works with its VPN off, both saved home routes
+  survive travel, and the phone reconnects with its VPN on away from home.
+- Test the home-network firewall's away state without publishing to foreign LANs,
+  and check login startup, crash recovery and offline-boot Serve repair as needed.
+- Report physical transitions or phone tests still pending. Computer-only HTTP
+  checks do not prove that a phone has saved its routes. Leave the owner's phone
+  under their control; no phone automation unless they explicitly authorize it.

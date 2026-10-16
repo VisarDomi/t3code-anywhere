@@ -2,8 +2,10 @@
 
 You are setting up [T3 Code](https://github.com/pingdotgg/t3code) so that the owner's
 desktop apps drive agents on each other's computers, at home or away, and the T3 phone
-app drives all of them. Everything travels over the owner's own Tailscale network
-(tailnet); T3 is published on the tailnet only, over HTTPS, and nowhere else.
+app drives all of them. Use the home LAN when the phone and computers are home,
+and the owner's private Tailscale network (tailnet) when the phone travels. Nothing
+is published to the public internet. A travelling laptop accepts LAN connections
+only at home.
 
 ## How it works
 
@@ -18,17 +20,18 @@ app drives all of them. Everything travels over the owner's own Tailscale networ
   - **Network access** lets devices on the same LAN connect without Tailscale: T3 then
     listens on 0.0.0.0, and clients learn each computer's LAN address as a route of
     its own, tried before Tailscale. These learned routes are temporary: T3 removes
-    them when the server stops reporting them. They are shortcuts, not the roaming
-    connection. Keep Tailscale connected on every device, even a phone at home,
-    because the other computer may be away. On a desktop that stays home it is safe
-    to leave Network access on. On a laptop it
+    them when the server stops reporting them. For a phone with Tailscale off at
+    home, explicitly save routes for the fixed home addresses using **Routes →
+    Add route**; automatic learning is insufficient. On a desktop that stays home
+    it is safe to leave Network access on. On a laptop it
     would also open T3 to every Wi-Fi it joins: there, either leave it off, or turn it
     on together with `macos/install.sh --home-network`, which keeps T3's port closed
     to the LAN everywhere except at home.
   - **Pairing**: each client (desktop or phone) pairs once per computer with a one-time
     link using the permanent Tailscale HTTPS name. Verify that route is saved without
     "found automatically". T3 handles reconnection while Tailscale is connected;
-    automatic LAN discovery cannot reach a remote computer or start a disabled VPN.
+    add permanent home LAN routes alongside that HTTPS route. Keep both: home
+    uses LAN with the phone VPN off; coffee uses Tailscale with the phone VPN on.
 - **[`t3code-keepalive`](t3code-keepalive)** (Linux and macOS) covers what T3 does not:
   it starts T3 at login; relaunches it when it dies without being quit (a normal Quit
   is respected); stops the backend a killed T3 leaves running (it would hold the port
@@ -65,11 +68,12 @@ pairing); the scripts here are for Linux and macOS.
    the admin console, or give you a 1-day API access token instead?
 5. Linux: can you run `sudo`, or will they run one command per computer? Does the
    computer log in automatically?
-6. At home, should devices reach each other without Tailscale (for example a phone that
-   temporarily disconnects Tailscale)? Then Network access goes on, and Mac laptops
-   get the home-network piece. Does a laptop use a fixed IP address at home? Explain
-   that this works only while both endpoints are home; automatic roaming requires
-   Tailscale on the phone at home too. See [ROAMING.md](ROAMING.md).
+6. Should the phone use Tailscale **off at home, on at coffee**? Then Network
+   access goes on, Mac laptops get the home-network piece, and every fixed home
+   interface address gets an explicitly saved client route. Record all home Wi-Fi
+   networks and fixed addresses. This workflow covers all-home, phone away alone,
+   and phone plus laptop away. Phone home / laptop away is excluded unless the
+   owner separately requests and authorizes a relay design. See [ROAMING.md](ROAMING.md).
 
 ## 2. Ground rules
 
@@ -184,12 +188,16 @@ carries the permissions of the version that issued it):
   field. Without anyone at the screen: [`tools/add-environment.mjs`](tools/add-environment.mjs).
 - **The phone**: Tailscale on, then scan a QR code of the link in the T3 app
   (`python3 -c 'import qrcode, sys; qrcode.make(sys.argv[1]).save("pair.png")' <link>`).
-  In Tailscale → profile/settings → VPN On Demand, enable it and set **Wi-Fi:
-  Always** and **Cellular: Always**, with no home-network exception. Leave the VPN
-  connected. Use no exit node unless the owner separately wants one. This is needed
-  even at home when a paired laptop is away. Verify each computer has a saved
-  `https://<name>.<tailnet>.ts.net/` route without "found automatically"; if already
-  present, retain the pairing and do not replace its URL with a LAN address.
+  Then, at home, add explicitly saved home LAN routes to that same environment
+  through **Routes → Add route**, using fresh pairing links with each fixed LAN
+  address as `--base-url`. Include Wi-Fi and Ethernet if both must work separately,
+  and the desktop's fixed address. The interface being paired must be reachable.
+  Verify each route is saved without "found automatically"; retain the saved HTTPS
+  route as well. Do not edit a learned route's displayed URL as a substitute.
+  After adding routes, turn the phone's Tailscale **off** and verify both hosts.
+  The daily phone policy is **off at home, on at coffee**, not Wi-Fi/Cellular Always.
+  Keep the computers' Tailscale services running so an away phone can reach them;
+  local home connections use the LAN. See [ROAMING.md](ROAMING.md).
 
 Check: `~/.t3/bin/t3 auth session list` on each computer lists its paired clients, and
 `~/.t3/bin/t3 auth pairing list` is empty.
@@ -210,12 +218,11 @@ work (below), and where this runbook is. Delete secrets and revoke the API token
   watcher restarts T3 after a crash or kill, never after Quit.
 - **Away from home**: the laptop joins any Wi-Fi; Tailscale reconnects and other devices
   reach it at its tailnet name. With `--home-network`, its T3 is closed to that Wi-Fi.
-- **The phone**: VPN On Demand keeps Tailscale connected on Wi-Fi and cellular,
-  including home Wi-Fi. The permanent HTTPS route survives LAN changes. T3 learns
-  current LAN shortcuts after connecting; learned home routes can disappear after
-  a laptop travels. Do not promise that one successful home connection permanently
-  teaches the phone its home addresses. See [ROAMING.md](ROAMING.md) for recovery and
-  the optional setup for local access while Tailscale is deliberately disconnected.
+- **The phone**: Tailscale **off at home, on at coffee**, whether the laptop stays
+  home or comes along. Explicitly saved home routes survive the laptop's travel;
+  learned routes do not. Keep the HTTPS route for travel. No URL edits or repeated
+  pairing are part of the daily routine. Do not enable an always-on phone VPN to
+  work around missing home routes. See [ROAMING.md](ROAMING.md).
 - **New device**: Tailscale on the same account, key expiry off, pair it (step 7).
 - **Phone notifications** (agent finished, needs approval) need T3 Connect (sign in,
   link the environments, enable Device Notifications in the phone app); a Tailscale
