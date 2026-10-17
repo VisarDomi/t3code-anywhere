@@ -72,8 +72,10 @@ pairing); the scripts here are for Linux and macOS.
    access goes on, Mac laptops get the home-network piece, and every fixed home
    interface address gets an explicitly saved client route. Record all home Wi-Fi
    networks and fixed addresses. This workflow covers all-home, phone away alone,
-   and phone plus laptop away. Phone home / laptop away is excluded unless the
-   owner separately requests and authorizes a relay design. See [ROAMING.md](ROAMING.md).
+   and phone plus laptop away. Ask whether devices also move independently. Phone
+   home / laptop away with the phone VPN off is outside this profile and needs a
+   separately agreed connection path. Do not silently change the owner's VPN
+   policy or install a relay. See [ROAMING.md](ROAMING.md).
 
 ## 2. Ground rules
 
@@ -178,8 +180,9 @@ right; create them after every computer runs its final T3 version, because a lin
 carries the permissions of the version that issued it):
 
 ```sh
+umask 077
 ~/.t3/bin/t3 auth pairing create --base-url https://<name>.<tailnet>.ts.net \
-  --label <client> --ttl 7d --json </dev/null      # → pairUrl
+  --label <client> --ttl 7d --json </dev/null > /path/to/private-pairing.json
 ```
 
 (or Settings → Connections → **Create link**, which also shows a QR code).

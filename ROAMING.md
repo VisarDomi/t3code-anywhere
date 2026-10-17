@@ -14,8 +14,9 @@ uses LAN routes and the phone does not need its VPN at home.
 | Home | Coffee | Coffee | On | Phone to both and laptop to desktop over Tailscale |
 
 The phone and laptop can be on different outside networks in the last case.
-**Phone home / laptop away is outside this workflow.** Do not add a relay or
-require the phone's VPN at home to cover a case the owner excluded.
+**Phone home / laptop away with the phone VPN off is outside this profile.** If
+needed, agree on another connection path before setup. Do not silently add a relay
+or change the owner's phone VPN policy.
 
 Hosts must be awake with T3 running. Outside networks need working internet,
 including any Wi-Fi sign-in. Keep every device on compatible T3 versions and the
@@ -31,8 +32,9 @@ For every client that must work locally without its VPN, including the phone:
 2. At home, create a new pairing link on each host for each fixed LAN address:
 
    ```sh
+   umask 077
    ~/.t3/bin/t3 auth pairing create --base-url http://<fixed-home-ip>:<t3-port> \
-     --label phone-home --ttl 7d --json </dev/null
+     --label phone-home --ttl 7d --json </dev/null > /path/to/private-pairing.json
    ```
 
    Treat the resulting link/code as a secret. Keep it out of repositories and
@@ -59,7 +61,10 @@ existing Tailscale route. Do not delete the environment or its working HTTPS
 route. Delete consumed QR/link files after verifying successful pairing; revoke
 unused pairing codes when abandoning setup.
 
-The computer's fixed home address must itself be stable. A laptop keeps its home
+Before pairing home routes, give each required home interface a stable address
+using a router DHCP reservation or an appropriate OS configuration. Choose unused
+addresses for the owner's network; do not copy another person's addresses.
+A laptop keeps its home
 Wi-Fi address only at home and uses DHCP elsewhere. On Mac laptops, Network access
 must be combined with the home-network firewall helper, which blocks the T3 port
 on foreign LANs while allowing Tailscale. Do not apply a home IP at a coffee shop

@@ -1,0 +1,21 @@
+# Setup credentials and per-machine configuration belong outside this checkout.
+.env
+.env.*
+!.env.example
+*.local.json
+*.local.conf
+home-network.conf
+tailscale-api-token
+*auth-key*
+*pairing*.json
+*pairing*.png
+pair.png
+*.key
+*.pem
+
+# Local tooling and editor files.
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+*~
