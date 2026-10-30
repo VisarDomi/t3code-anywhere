@@ -70,6 +70,33 @@ must be combined with the home-network firewall helper, which blocks the T3 port
 on foreign LANs while allowing Tailscale. Do not apply a home IP at a coffee shop
 or open T3 to foreign Wi-Fi to repair a stale client route.
 
+## Optional access to existing LAN apps and PWAs
+
+T3's saved routes do not make unrelated applications' LAN addresses reachable.
+An app installed at `https://<fixed-home-ip>:<port>` can still fail away from
+home even when T3 itself works over Tailscale.
+
+For a home computer whose existing apps must keep their URLs, advertise and approve
+only that computer's fixed address as a `/32` route, rather than the entire LAN:
+
+```sh
+tailscale set --advertise-routes=<fixed-home-ip>/32
+```
+
+Replace the placeholder with the owner's address, preserve any existing approved
+route advertisements, and approve the exact route in the tailnet admin console.
+Follow Tailscale's [subnet route setup](https://tailscale.com/docs/features/subnet-routers/how-to/setup)
+for the host platform and verify the real path from another device. A route to
+the router host itself is different from forwarding to other LAN devices; do not
+enable broader forwarding or an exit node as a substitute for a missing host route.
+
+This keeps PWA origins, browser storage, certificate names and installed native
+configuration unchanged. The phone still uses Tailscale off at home and on away.
+Check application source-address filters too: Python's `ipaddress.is_private`
+does not include `100.64.0.0/10`. An otherwise reachable app may reject tailnet
+clients with HTTP 403 until its intended private-client policy includes that range.
+Retain application authentication, certificate verification and same-origin checks.
+
 ## Why automatic discovery is insufficient
 
 T3 reports its current private interface addresses, and clients add them as routes
