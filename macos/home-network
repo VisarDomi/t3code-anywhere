@@ -48,8 +48,16 @@ fi
 [ -n "${HOME_IP:-}" ] || exit 0
 ifconfig "$IFACE" 2>/dev/null | grep -q 'status: active' || { rm -f "$MISS"; exit 0; }
 mode=$(networksetup -getinfo "$SERVICE" | head -1)
-ping -c 1 -t 1 -b "$IFACE" "$ROUTER" >/dev/null 2>&1    # refresh the ARP entry over Wi-Fi
-mac=$(arp -n -i "$IFACE" "$ROUTER" 2>/dev/null | awk '$3 == "at" {print $4}')
+mac=
+# Require a live, directly attached gateway on this interface. A cached ARP entry
+# can survive a Wi-Fi move; reaching the old router through NAT is not that LAN.
+if ping -c 1 -t 1 -b "$IFACE" "$ROUTER" >/dev/null 2>&1; then
+    wifi_route=$(route -n get -ifscope "$IFACE" "$ROUTER" 2>/dev/null) || wifi_route=
+    if printf '%s\n' "$wifi_route" | grep -Eq "interface:[[:space:]]*$IFACE([[:space:]]|$)" &&
+       ! printf '%s\n' "$wifi_route" | grep -q 'flags:.*GATEWAY'; then
+        mac=$(arp -n -i "$IFACE" "$ROUTER" 2>/dev/null | awk '$3 == "at" {print $4}')
+    fi
+fi
 if [ "$mac" = "$ROUTER_MAC" ]; then
     rm -f "$MISS"
     case "$mode" in

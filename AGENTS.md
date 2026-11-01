@@ -1,5 +1,9 @@
 # T3 Code across your machines: runbook for agents
 
+Mac-specific recovery changes in this working copy are backed up to the private
+`VisarDomi/t3code-anywhere-private` repository (`private-backup` remote). The public
+`origin` is upstream; do not publish private Mac incident/configuration changes there.
+
 You are setting up [T3 Code](https://github.com/pingdotgg/t3code) so that the owner's
 desktop apps drive agents on each other's computers, at home or away, and the T3 phone
 app drives all of them. Use the home LAN when the phone and computers are home,
