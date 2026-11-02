@@ -171,6 +171,14 @@ mapping). The watcher and `linux/install.sh` do not apply there.
 - Settings → General → **Update track**: the same everywhere.
 - **Continue threads after restarts**: on (the default).
 
+On Linux, `linux/install.sh` also installs the local AppImage power-recovery repair.
+It postpones restart continuations while internet is unavailable, retaining them
+in the existing durable queue without spending the normal failure budget, and
+sends Codex exactly `continue`. The desktop and LAN still open offline.
+See [power recovery](README.md#power-recovery-on-linux) for version checks, backups
+and rollback. Install `squashfs-tools` on non-Debian distributions. Never edit a
+signed Mac app to apply this Linux repair.
+
 Check on each computer: `tailscale serve status` shows `https://<name>.<tailnet>.ts.net`
 → `http://127.0.0.1:<port>`. From another device: `curl -s
 https://<name>.<tailnet>.ts.net/.well-known/t3/environment` returns its version and
@@ -227,7 +235,10 @@ work (below), and where this runbook is. Delete secrets and revoke the API token
   which updates providers, then other computers, then this app. Settings → Connections
   → **Update all** updates the other computers. Keep all on one protocol version.
 - **Restarts**: interrupted threads continue (Continue threads after restarts). The
-  watcher restarts T3 after a crash or kill, never after Quit.
+  watcher restarts T3 after a crash or kill, never after Quit. With the Linux repair,
+  cloud-agent restart continuations wait indefinitely for internet; a 2–5 minute
+  router/ISP delay is not a terminal failure. An AppImage already running when the
+  repair was installed picks it up at its next normal launch.
 - **Away from home**: the laptop joins any Wi-Fi; Tailscale reconnects and other devices
   reach it at its tailnet name. With `--home-network`, its T3 is closed to that Wi-Fi.
 - **The phone**: Tailscale **off at home, on at coffee**, whether the laptop stays

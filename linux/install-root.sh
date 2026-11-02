@@ -13,6 +13,12 @@ set -euo pipefail
 
 user="${SUDO_USER:?run this with sudo from the desktop user}"
 
+if command -v apt-get >/dev/null &&
+   { ! command -v python3 >/dev/null || ! command -v mksquashfs >/dev/null; }; then
+  apt-get update -q
+  apt-get install -y -q python3 squashfs-tools
+fi
+
 if ! command -v tailscale >/dev/null; then
   curl -fsSL https://tailscale.com/install.sh | sh
 fi

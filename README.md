@@ -9,6 +9,11 @@ The helpers start T3 at login, recover after a crash, and repair its Tailscale H
 mapping after an offline boot. On a travelling Mac, the optional home-network helper
 allows T3 on the home LAN and blocks its port on foreign Wi-Fi.
 
+The Linux AppImage helper also repairs restart continuation on compatible T3 builds:
+the desktop opens while offline, but interrupted cloud-agent turns wait for working
+internet without a deadline. Codex continuations send exactly `continue`, avoiding
+the affected release's `EmptyInput` failure. See [power recovery](#power-recovery-on-linux).
+
 ## Give this to your agent
 
 Share this prompt with your coding agent:
@@ -57,6 +62,8 @@ different connection path; the home/coffee profile does not provide a relay.
   defaults to stable; nightly requires the matching mobile beta.
 - Shell, `curl` and Python 3 for the helper scripts. Some steps also use Git,
   OpenSSL, GNOME keyring tools or Python's `qrcode` module, as described in the guide.
+- Linux AppImage repair uses `mksquashfs` from `squashfs-tools`; the root installer
+  installs it on Debian/Ubuntu. Other distributions need that package installed first.
 - macOS Intel and Apple silicon are covered. Windows uses T3 and Tailscale's native
   installers; this repository does not include Windows helper scripts.
 
@@ -64,6 +71,49 @@ Keep tokens, pairing links, QR codes and machine-specific configuration outside 
 checkout. The repository's ignore rules are an additional safeguard. T3 UI and CLI
 details can change; [ROAMING.md](ROAMING.md) links the source version used to verify
 saved-route behavior.
+
+## Power recovery on Linux
+
+Run the normal Linux installer to install the repair and watcher. On the next app
+launch, eligible interrupted turns stay in T3's durable recovery queue until one
+of two HTTPS connectivity probes returns its expected empty response. Checks time
+out after five seconds and retry every 30 seconds, with no overall deadline. A
+router, DNS service or system clock that recovers several minutes after the PC
+therefore does not consume the agent's ordinary startup attempts. Desktop/LAN access
+starts independently. A captive portal is not counted as working internet.
+
+Once online, T3 rechecks the thread and uses its existing continuation dispatch:
+Stop, newer work, archived/settled threads and approval/secret requirements still
+apply. Authentication, quota and ordinary provider failures retain their normal
+handling. This repairs boot/restart recovery; it does not change retry policy for
+arbitrary failures in a running turn. The automatic continuation input is `continue`.
+
+This is a local AppImage repair, verified against
+`0.1.7-nightly.20261101.4016`, rather than an upstream release. All changed bundle
+anchors must match exactly; otherwise the helper leaves the app untouched and
+records the refusal. The original AppImage, hashes and installation record are in
+`~/.local/share/t3code-power-recovery/`. ASAR file offsets and SHA-256 integrity
+metadata are rebuilt, and the replacement app is verified before an atomic swap.
+An already running app keeps its old mounted inode until its next normal launch.
+
+The watcher checks replacement downloads once a minute and repairs compatible
+ones for their next launch. It also checks immediately before a launch it owns.
+An upstream packaging change may require updating these anchors; see
+`watcher.log`, `last-build.log` and `failed.json` in the repair directory. A refusal
+does not prevent the original app from opening. This helper does not modify a
+signed macOS app or a headless T3 installation.
+
+Check the installed app:
+
+```sh
+python3 ~/.local/lib/t3code-power-recovery/power-recovery.py --status
+```
+
+`currentAppMatches` must be true. To undo the repair, first move
+`~/.local/lib/t3code-power-recovery/` aside so the watcher no longer reapplies it,
+then copy the original named by `backup` to a temporary sibling of the AppImage
+and rename that file over it. The change takes effect at the next normal launch.
+Do not overwrite a mounted AppImage in place or restart T3 while agents are working.
 
 ## What is here
 

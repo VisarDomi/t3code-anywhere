@@ -53,9 +53,23 @@ launch() {
     else
         app=${T3CODE_APP:-$HOME/Applications/T3-Code.AppImage}
         [ -x "$app" ] || app=/usr/bin/t3code
+        repair_install
         # 9>&-: the app must not inherit the watcher's lock.
         setsid "$app" >/dev/null 2>&1 </dev/null 9>&- &
     fi
+}
+
+# The repair is Linux-only: changing a signed macOS app would invalidate its signature.
+# It changes only a replacement AppImage inode; a running app is never restarted here.
+repair_install() {
+    [ "$(uname)" = Linux ] || return 0
+    recovery_helper="${T3CODE_RECOVERY_HELPER:-$HOME/.local/lib/t3code-power-recovery/power-recovery.py}"
+    recovery_app=${T3CODE_APP:-$HOME/Applications/T3-Code.AppImage}
+    [ -f "$recovery_helper" ] && [ -x "$recovery_app" ] && command -v python3 >/dev/null || return 0
+    recovery_state="$HOME/.local/share/t3code-power-recovery"
+    mkdir -p -m 700 "$recovery_state"
+    python3 "$recovery_helper" --app "$recovery_app" >"$recovery_state/last-result.json" 2>"$recovery_state/watcher.log" 9>&- ||
+        printf '%s\n' "T3 power recovery repair refused this AppImage; see $recovery_state/watcher.log" >&2
 }
 
 # Stops the backend a killed app left behind. Its pid comes from the runtime file and
@@ -92,9 +106,20 @@ repair_serve() {
     "$tailscale" serve --bg --yes --https="${https:-443}" "$target" >/dev/null 2>&1 && unserved=0
 }
 
+# A download can replace the AppImage independently of this watcher. Keep the next
+# launch repaired as well; the helper uses a lock and a cheap unchanged-file check.
+repair_install 9>&- &
+repair_pid=$!
+repair_ticks=0
 app_running || { stop_orphan; launch; }
 gone=0
 while sleep 10; do
+    repair_ticks=$((repair_ticks + 1))
+    if [ "$repair_ticks" -ge 6 ] && ! kill -0 "$repair_pid" 2>/dev/null; then
+        repair_install 9>&- &
+        repair_pid=$!
+        repair_ticks=0
+    fi
     if app_running; then
         gone=0
         repair_serve

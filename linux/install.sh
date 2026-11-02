@@ -57,7 +57,11 @@ update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 xdg-mime default t3code.desktop x-scheme-handler/t3code x-scheme-handler/t3code-dev 2>/dev/null || true
 
 install -d "$HOME/.local/bin" "$HOME/.config/autostart"
-install -m 755 "$here/../t3code-keepalive" "$HOME/.local/bin/t3code-keepalive"
+install -d "$HOME/.local/lib/t3code-power-recovery"
+install -m 755 "$here/power-recovery.py" "$HOME/.local/lib/t3code-power-recovery/power-recovery.py"
+install -m 644 "$here/power-recovery.js" "$HOME/.local/lib/t3code-power-recovery/power-recovery.js"
+install -m 755 "$here/../t3code-keepalive" "$HOME/.local/bin/t3code-keepalive.new"
+mv -f "$HOME/.local/bin/t3code-keepalive.new" "$HOME/.local/bin/t3code-keepalive"
 # T3 writes ~/.t3/bin/t3 on its first run; run this script again afterwards if missing.
 [ -x "$HOME/.t3/bin/t3" ] && ln -sfn "$HOME/.t3/bin/t3" "$HOME/.local/bin/t3"
 cat > "$HOME/.config/autostart/t3code-keepalive.desktop" <<EOF
