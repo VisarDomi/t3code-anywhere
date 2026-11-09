@@ -89,9 +89,11 @@ handling. This repairs boot/restart recovery; it does not change retry policy fo
 arbitrary failures in a running turn. The automatic continuation input is `continue`.
 
 This is a local AppImage repair, verified against
-`0.1.7-nightly.20261101.4016`, rather than an upstream release. All changed bundle
-anchors must match exactly; otherwise the helper leaves the app untouched and
-records the refusal. The original AppImage, hashes and installation record are in
+`0.1.7-nightly.20261101.4016` (single `binCli-*.mjs` server bundle) and
+`0.1.8-nightly.20261109.4399` (code-split; the code is in `runtimeLayer-*.mjs`),
+rather than an upstream release. The helper patches the one server module that
+defines the restart continuation. All changed bundle anchors must match exactly;
+otherwise the helper leaves the app untouched and records the refusal. The original AppImage, hashes and installation record are in
 `~/.local/share/t3code-power-recovery/`. ASAR file offsets and SHA-256 integrity
 metadata are rebuilt, and the replacement app is verified before an atomic swap.
 An already running app keeps its old mounted inode until its next normal launch.
@@ -100,7 +102,9 @@ The watcher checks replacement downloads once a minute and repairs compatible
 ones for their next launch. It also checks immediately before a launch it owns.
 An upstream packaging change may require updating these anchors; see
 `watcher.log`, `last-build.log` and `failed.json` in the repair directory. A refusal
-does not prevent the original app from opening. This helper does not modify a
+does not prevent the original app from opening. `failed.json` records the refused
+AppImage identity, `appVersion`, `error`, `at` and the helper's `helperSha256`; an
+updated helper therefore retries a bundle that an older helper refused. This helper does not modify a
 signed macOS app or a headless T3 installation.
 
 Check the installed app:
@@ -109,7 +113,9 @@ Check the installed app:
 python3 ~/.local/lib/t3code-power-recovery/power-recovery.py --status
 ```
 
-`currentAppMatches` must be true. To undo the repair, first move
+`currentAppMatches` and `ok` must be true. The status check is read-only, takes
+well under a second and always prints JSON, including `failed` and
+`failedForCurrentApp` for monitors. To undo the repair, first move
 `~/.local/lib/t3code-power-recovery/` aside so the watcher no longer reapplies it,
 then copy the original named by `backup` to a temporary sibling of the AppImage
 and rename that file over it. The change takes effect at the next normal launch.

@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -33,6 +34,15 @@ effect.attemptCount >= maxAttempts ? yield* outbox.fail({});
 const delay = {delayMs: Math.min(3e4, 100 * 2 ** Math.max(0, effect.attemptCount - 1))};
 ''' + f"const CONTINUE_PROMPT = {json.dumps(repair.OLD_CONTINUE_PROMPT)};\n"
 
+# 0.1.8-nightly.20261109.4399 split the server into chunks. The same code lives in
+# apps/server/dist/runtimeLayer-*.mjs, with different bundler collision suffixes.
+SPLIT_FIXTURE = (FIXTURE
+                 .replace('import { En as tryPromise, } from "./Effect.mjs";',
+                          'import { vs as tapError, ws as tryPromise, } from "./Schema-D36BDnNk.mjs";\n'
+                          'const used = tryPromise({ try: async () => 1, catch: (cause) => cause });')
+                 .replace("tapError$1(() => willRetry ? void_$1 :", "tapError(() => willRetry ? void_ :"))
+LAYOUTS = {"0.1.7-nightly.20261101.4016": FIXTURE, "0.1.8-nightly.20261109.4399": SPLIT_FIXTURE}
+
 
 def node(source):
     result = subprocess.run(["node", "--input-type=module", "-"], input=source,
@@ -44,7 +54,9 @@ def node(source):
 
 class RecoveryTests(unittest.TestCase):
     def test_empty_codex_continuation_is_rejected_before_repair_and_sent_after(self):
-        for source, repaired in [(FIXTURE, False), (repair.patch_bundle(FIXTURE, HELPER), True)]:
+        cases = [(source, repaired) for fixture in LAYOUTS.values()
+                 for source, repaired in [(fixture, False), (repair.patch_bundle(fixture, HELPER), True)]]
+        for source, repaired in cases:
             block = source[source.index("const adapter = {"):source.index("const continueRestartedRun")]
             if repair.MARKER in block:
                 block = block[:block.index(repair.MARKER)]
@@ -66,6 +78,19 @@ const run = () => adapter.startTurn({restartContinuationOfRunId:'cut-run', messa
                        if repaired else "assert.throws(run, /EmptyInput/);")
             script += "adapter.startTurn({message:{text:'normal user input'}}).next(); assert.equal(received[0].text, 'normal user input');"
             node(script)
+
+    def test_both_layouts_receive_the_same_semantic_patch(self):
+        for version, fixture in LAYOUTS.items():
+            with self.subTest(version=version):
+                patched = repair.patch_bundle(fixture, HELPER)
+                self.assertIn('const CONTINUE_PROMPT = "continue";', patched)
+                self.assertIn('[{ type: "text", text: "continue" }]', patched)
+                self.assertIn("yield* tryPromise({ try: t3RecoveryWaitForInternet", patched)
+                tap = "tapError$1" if "tapError$1" in fixture else "tapError"
+                void = "void_$1" if "void_$1" in fixture else "void_"
+                self.assertIn(f'{tap}((cause) => willRetry || t3RecoveryWaiting("provider-runtime.continue", cause) '
+                              f'? {void} : threads.recoverDelegatedTask(effect.threadId, sourceRunId))', patched)
+                self.assertEqual(patched.count(repair.MARKER), 1)
 
     def test_offline_wait_has_no_attempt_limit_and_rejects_captive_portals(self):
         patched = repair.patch_bundle(FIXTURE, HELPER)
@@ -117,12 +142,97 @@ assert.equal(calls, 2);
 ''')
 
     def test_patch_is_idempotent_and_refuses_unrecognized_code(self):
-        patched = repair.patch_bundle(FIXTURE, HELPER)
-        self.assertEqual(repair.patch_bundle(patched, HELPER), patched)
-        with self.assertRaises(ValueError):
-            repair.patch_bundle(FIXTURE.replace(" : []);", " : [different]);"), HELPER)
-        with self.assertRaises(ValueError):
-            repair.patch_bundle(FIXTURE + FIXTURE, HELPER)
+        for fixture in LAYOUTS.values():
+            patched = repair.patch_bundle(fixture, HELPER)
+            self.assertEqual(repair.patch_bundle(patched, HELPER), patched)
+            with self.assertRaises(ValueError):
+                repair.patch_bundle(fixture.replace(" : []);", " : [different]);"), HELPER)
+            with self.assertRaises(ValueError):
+                repair.patch_bundle(fixture + fixture, HELPER)
+            with self.assertRaises(ValueError):
+                repair.patch_bundle(fixture.replace("willRetry ? void_", "willRetry ? other_"), HELPER)
+
+    def test_patched_module_is_the_one_server_chunk_with_the_restart_continuation(self):
+        def archive(directory, files):
+            path = Path(directory) / "app.asar"
+            header, blob = {"files": {}}, b""
+            for name, data in files.items():
+                node = header
+                *folders, leaf = name.split("/")
+                for folder in folders:
+                    node = node["files"].setdefault(folder, {"files": {}})
+                node["files"][leaf] = {"size": len(data), "offset": str(len(blob))}
+                blob += data
+            raw = json.dumps(header).encode()
+            padded = raw + b"\0" * (-len(raw) % 4)
+            pickle = struct.pack("<II", len(padded) + 4, len(raw)) + padded
+            path.write_bytes(struct.pack("<II", 4, len(pickle)) + pickle + blob)
+            return (path, *repair.read_asar(path))
+
+        layouts = {
+            "single": {"apps/server/dist/bin.mjs": b"import './binCli-A.mjs';",
+                       "apps/server/dist/binCli-A.mjs": FIXTURE.encode()},
+            "split": {"apps/server/dist/binCli-B.mjs": b"export const cli = 1;",
+                      "apps/server/dist/runtimeLayer-C.mjs": SPLIT_FIXTURE.encode(),
+                      "apps/web/dist/x.mjs": SPLIT_FIXTURE.encode()},
+        }
+        expected = {"single": "apps/server/dist/binCli-A.mjs", "split": "apps/server/dist/runtimeLayer-C.mjs"}
+        for layout, files in layouts.items():
+            with tempfile.TemporaryDirectory() as directory:
+                self.assertEqual(repair.restart_module(*archive(directory, files)), expected[layout])
+        with tempfile.TemporaryDirectory() as directory:
+            twice = {"apps/server/dist/a.mjs": FIXTURE.encode(), "apps/server/dist/b.mjs": FIXTURE.encode()}
+            with self.assertRaises(ValueError):
+                repair.restart_module(*archive(directory, twice))
+
+    def test_refusal_is_recorded_for_monitors_and_a_new_helper_retries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            app, state = directory / "T3-Code.AppImage", directory / "state"
+            app.write_text("#!/bin/sh\nexit 1\n")
+            app.chmod(0o755)
+            with self.assertRaises(Exception):
+                repair.apply(app, state)
+            failed = json.loads((state / "failed.json").read_text())
+            stamp = app.stat()
+            self.assertEqual(failed["identity"], [stamp.st_ino, stamp.st_size, stamp.st_mtime_ns])
+            self.assertEqual(failed["patchLevel"], repair.PATCH_LEVEL)
+            self.assertEqual(failed["helperSha256"], repair.helper_fingerprint())
+            self.assertIn("at", failed)
+            self.assertIn("appVersion", failed)
+            with self.assertRaisesRegex(ValueError, "previous repair refused"):
+                repair.apply(app, state)
+            failed["helperSha256"] = "an older helper"
+            (state / "failed.json").write_text(json.dumps(failed))
+            with self.assertRaises(Exception) as retried:
+                repair.apply(app, state)
+            self.assertNotIn("previous repair refused", str(retried.exception))
+            report = repair.status(app, state)
+            self.assertFalse(report["currentAppMatches"])
+            self.assertTrue(report["failedForCurrentApp"])
+            self.assertFalse(report["ok"])
+
+    def test_status_is_read_only_and_matches_the_installed_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            app, state = directory / "T3-Code.AppImage", directory / "state"
+            state.mkdir()
+            app.write_bytes(b"repaired")
+            stamp = app.stat()
+            record = {"patchLevel": repair.PATCH_LEVEL, "installedSha256": hashlib.sha256(b"repaired").hexdigest(),
+                      "identity": [stamp.st_ino, stamp.st_size, stamp.st_mtime_ns]}
+            (state / "installed.json").write_text(json.dumps(record))
+            before = sorted(os.listdir(state))
+            report = repair.status(app, state)
+            self.assertTrue(report["currentAppMatches"])
+            self.assertTrue(report["ok"])
+            self.assertFalse(report["failedForCurrentApp"])
+            self.assertEqual(sorted(os.listdir(state)), before)
+            replacement = directory / "new"
+            replacement.write_bytes(b"a new download")
+            replacement.replace(app)
+            self.assertFalse(repair.status(app, state)["currentAppMatches"])
+            self.assertFalse(repair.status(app, directory / "empty")["ok"])
 
     def test_asar_rewrite_preserves_neighboring_files_offsets_and_integrity(self):
         with tempfile.TemporaryDirectory() as directory:
