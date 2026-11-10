@@ -9,7 +9,7 @@ import unittest
 SCRIPT = Path(__file__).parents[1] / 'macos/home-network'
 
 class HomeNetworkTests(unittest.TestCase):
-    def run_policy(self, *, wifi_ping=True, routed=False, mac='aa:bb:cc:dd:ee:ff', manual=True, age=60):
+    def run_policy(self, *, wifi_ping=True, routed=False, mac='aa:bb:cc:dd:ee:ff', manual=True, age=60, watch=False):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory); commands=root/'bin';commands.mkdir()
             conf=root/'config';miss=root/'miss';log=root/'calls'
@@ -32,10 +32,15 @@ if name=='networksetup':
 '''
             for name in ['ping','arp','ifconfig','route','networksetup','logger']:
                 p=commands/name;p.write_text(command);p.chmod(0o755)
+            notify=commands/'notifyutil';notify.write_text('#!/bin/sh\necho change\nsleep 0.2\necho change\n');notify.chmod(0o755)
             env=dict(os.environ,PATH=str(commands)+os.pathsep+os.environ['PATH'],
                      WIFI_PING='1' if wifi_ping else '0',ROUTED='1' if routed else '0',
                      GATEWAY_MAC=mac,MANUAL='1' if manual else '0',CALLS=str(log))
-            subprocess.run(['/bin/sh',str(test_script)],env=env,check=True,capture_output=True,timeout=8)
+            if watch:
+                result=subprocess.run(['/bin/bash',str(test_script),'--watch'],env=env,capture_output=True,timeout=20)
+                self.assertEqual(result.returncode,1)  # notifyutil ended: launchd restarts the job
+            else:
+                subprocess.run(['/bin/sh',str(test_script)],env=env,check=True,capture_output=True,timeout=8)
             return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
     def test_live_home_gateway_keeps_fixed_address(self):
@@ -55,5 +60,9 @@ if name=='networksetup':
 
     def test_return_to_direct_home_lan_restores_fixed_address(self):
         self.assertEqual(self.run_policy(manual=False),[['-setmanualwithdhcprouter','Wi-Fi','192.168.1.199']])
+
+    def test_watch_evaluates_at_start_and_once_per_burst_of_network_changes(self):
+        restore=['-setmanualwithdhcprouter','Wi-Fi','192.168.1.199']
+        self.assertEqual(self.run_policy(manual=False,watch=True),[restore,restore])
 
 if __name__=='__main__':unittest.main()

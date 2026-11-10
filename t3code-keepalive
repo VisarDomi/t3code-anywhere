@@ -34,17 +34,21 @@ if command -v flock >/dev/null; then
     flock -w 15 9 || exit 0
 fi
 
+# Sets $app_pid to the running app's main process, or empty.
 app_running() {
+    app_pid=
     if [ "$(uname)" = Darwin ]; then
-        [ -n "$(lsappinfo find bundleid=com.t3tools.t3code)" ]
+        app_pid=$(lsappinfo info -only pid -app com.t3tools.t3code 2>/dev/null |
+            sed -n 's/.*"pid"=\([0-9][0-9]*\).*/\1/p')
     else
         # The main process is the t3code process that is neither a Chromium helper
         # (--type=) nor the backend (bin.mjs).
-        for pid in $(pgrep -u "$(id -u)" -x t3code); do
-            tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qE -- '--type=|bin\.mjs' || return 0
+        for candidate in $(pgrep -u "$(id -u)" -x t3code); do
+            tr '\0' ' ' < "/proc/$candidate/cmdline" 2>/dev/null | grep -qE -- '--type=|bin\.mjs' ||
+                { app_pid=$candidate; break; }
         done
-        return 1
     fi
+    [ -n "$app_pid" ]
 }
 
 launch() {
@@ -89,14 +93,19 @@ stop_orphan() {
 # With Tailscale HTTPS on and Tailscale connected, publish T3 if it is not published.
 # Waits 30 s first, so it never races T3's own setup; does nothing with the setting off.
 unserved=0
+served=no
 repair_serve() {
+    # Nothing to publish (no Tailscale, or the setting off) also counts as settled.
+    served=yes
     [ -n "$tailscale" ] || return 0
     grep -q '"tailscaleServeEnabled": *true' "$desktop_settings" 2>/dev/null || return 0
+    served=no
     port=$(sed -n 's/.*"port":\([0-9][0-9]*\).*/\1/p' "$runtime" 2>/dev/null)
     [ -n "$port" ] || return 0
     target="http://127.0.0.1:$port"
     if "$tailscale" serve status --json 2>/dev/null | grep -q "\"Proxy\": *\"$target\""; then
         unserved=0
+        served=yes
         return 0
     fi
     "$tailscale" status --json --peers=false 2>/dev/null | grep -q '"BackendState": *"Running"' || return 0
@@ -113,19 +122,26 @@ repair_pid=$!
 repair_ticks=0
 app_running || { stop_orphan; launch; }
 gone=0
+tick=0
+# Each 10 s round is a builtin signal check on the app's pid. The full app lookup and the
+# Tailscale CLI run every 5 minutes, or every round while T3 is not yet published. (Spawning
+# lsappinfo and `tailscale serve status` every round cost 0.5 CPU-s, 5% of a core, on the
+# Intel Mac.)
 while sleep 10; do
+    tick=$(( (tick + 1) % 30 ))
     repair_ticks=$((repair_ticks + 1))
     if [ "$repair_ticks" -ge 6 ] && ! kill -0 "$repair_pid" 2>/dev/null; then
         repair_install 9>&- &
         repair_pid=$!
         repair_ticks=0
     fi
-    if app_running; then
+    if { [ "$tick" -ne 0 ] && [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; } || app_running; then
         gone=0
-        repair_serve
+        [ "$served" = yes ] && [ "$tick" -ne 0 ] || repair_serve
         continue
     fi
     unserved=0
+    served=no
     if [ ! -f "$runtime" ]; then
         gone=0
         continue

@@ -1,8 +1,11 @@
 #!/bin/sh
 # Treats a laptop differently at home and elsewhere. Home is recognised by the router's
 # MAC address, so a foreign network that reuses the same router address is "away".
-# Runs as root every 10 s (LaunchDaemon local.home-network) with settings from
-# /usr/local/etc/home-network.conf, written by `macos/install.sh --home-network` at home:
+# Runs as root (LaunchDaemon local.home-network, `--watch`): it sleeps on macOS's
+# network-change notification and evaluates at start, after every change, every 5 minutes,
+# and every 10 s while a fixed address waits out its away grace. Without `--watch` it
+# evaluates once. Settings come from /usr/local/etc/home-network.conf, written by
+# `macos/install.sh --home-network` at home:
 #
 #   ROUTER=192.168.1.1  ROUTER_MAC=aa:b:cc:dd:e:ff   (as `arp` prints it, no leading zeros)
 #   T3_LAN=yes          T3 Code's port is reachable on the LAN only at home: with T3's
@@ -26,6 +29,7 @@ PORTS=3773:3799                        # T3 starts at 3773 and moves up when it 
 
 log() { logger -t home-network "$*"; }
 
+evaluate() {
 # Home: the router answers now, and with its known MAC address.
 ping -c 1 -t 1 "$ROUTER" >/dev/null 2>&1 &&
     arp -an | awk -v r="($ROUTER)" '$2 == r && $3 == "at" {print $4}' | grep -qx "$ROUTER_MAC" &&
@@ -45,8 +49,8 @@ if [ "${T3_LAN:-no}" = yes ]; then
     fi
 fi
 
-[ -n "${HOME_IP:-}" ] || exit 0
-ifconfig "$IFACE" 2>/dev/null | grep -q 'status: active' || { rm -f "$MISS"; exit 0; }
+[ -n "${HOME_IP:-}" ] || return 0
+ifconfig "$IFACE" 2>/dev/null | grep -q 'status: active' || { rm -f "$MISS"; return 0; }
 mode=$(networksetup -getinfo "$SERVICE" | head -1)
 mac=
 # Require a live, directly attached gateway on this interface. A cached ARP entry
@@ -65,7 +69,7 @@ if [ "$mac" = "$ROUTER_MAC" ]; then
         *) networksetup -setmanualwithdhcprouter "$SERVICE" "$HOME_IP" &&
                log "home: Wi-Fi fixed at $HOME_IP" ;;
     esac
-    exit 0
+    return 0
 fi
 case "$mode" in
     Manual*)
@@ -78,3 +82,22 @@ case "$mode" in
         ;;
     *) rm -f "$MISS" ;;
 esac
+}
+
+if [ "${1:-}" = --watch ]; then
+    # One idle notifyutil and a blocked `read` replace a 10-second poll (1.8 CPU-s per run on
+    # the Intel Mac, 18% of a core). A change arrives as a burst: wait 2 s for it to settle.
+    # If notifyutil ends, the job exits and launchd's KeepAlive restarts it.
+    notifyutil -w com.apple.system.config.network_change 2>/dev/null | {
+        evaluate </dev/null
+        while :; do
+            if [ -f "$MISS" ]; then wait=10; else wait=300; fi
+            read -r -t "$wait" _; status=$?
+            [ "$status" -eq 0 ] || [ "$status" -gt 128 ] || exit 1
+            while read -r -t 2 _; do :; done
+            evaluate </dev/null
+        done
+    }
+    exit 1
+fi
+evaluate

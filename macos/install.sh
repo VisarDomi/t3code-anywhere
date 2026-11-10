@@ -100,8 +100,8 @@ HOME_IP=$home_ip" ;;
 <plist version="1.0">
 <dict>
   <key>Label</key><string>local.home-network</string>
-  <key>ProgramArguments</key><array><string>/usr/local/libexec/home-network</string></array>
-  <key>StartInterval</key><integer>10</integer>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>/usr/local/libexec/home-network</string><string>--watch</string></array>
+  <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
 </dict>
 </plist>' /Library/LaunchDaemons/local.home-network.plist root
