@@ -9,6 +9,12 @@ Supported layouts: the single server bundle of 0.1.7-nightly.20261101.4016
 (`apps/server/dist/binCli-*.mjs`) and the code-split bundle of
 0.1.8-nightly.20261109.4399 (`apps/server/dist/runtimeLayer-*.mjs`). The patched
 module is the one server chunk that defines the restart continuation.
+
+Patch level 3 adds the owner-requested paired-device sessions (2026-11-10): a
+session from a pairing link (bearer, subject `one-time-token`) no longer expires,
+including the 30-day sessions issued before the repair. Revocation still ends it.
+CLI-issued tokens, browser cookies and DPoP tokens keep their lifetimes. That code
+is in the one server chunk that defines `SessionStore.verify`.
 """
 
 import argparse
@@ -24,10 +30,19 @@ import subprocess
 import tempfile
 import time
 
-PATCH_LEVEL = 2
+PATCH_LEVEL = 3
 MARKER = "// t3code-anywhere power recovery v2"
+SESSION_MARKER = "// t3code-anywhere paired sessions v1"
 HERE = Path(__file__).resolve().parent
 RESTART_MODULE_ANCHOR = 'fn("RestartContinuation.continueRestartedRun")'
+SESSION_MODULE_ANCHOR = 'fn("SessionStore.verify")'
+PAIRED_SESSION_HELPER = (
+    SESSION_MARKER + "\n"
+    "// A device paired with a pairing link keeps its session until it is revoked.\n"
+    "const T3_ANYWHERE_PAIRED_TTL = days(36500);\n"
+    "const t3AnywherePaired = (session) => session.method === \"bearer-access-token\" && "
+    "(session.subject ?? session.sub) === \"one-time-token\";\n"
+)
 OLD_CONTINUE_PROMPT = "Continue where you left off. Your last turn was cut short, so a command or other action it started may have finished or may still be running. Before you repeat one that changes state, confirm it did not take effect and is not still running; if you cannot tell, say so instead of repeating it."
 
 
@@ -84,17 +99,76 @@ def patch_bundle(source, helper):
     return source
 
 
-def restart_module(archive, header, base):
-    """Return the one server module that owns the restart continuation."""
+def patch_sessions(source):
+    """Paired devices keep their sessions until revoked (owner request, 2026-11-10)."""
+    if SESSION_MARKER in source:
+        return source
+    if not re.search(r"\bas days\b", source):
+        raise ValueError("unsupported bundle: missing Duration.days import")
+    source = replace_one(source, "const DEFAULT_SESSION_TTL = days(30);\n",
+                         "const DEFAULT_SESSION_TTL = days(30);\n" + PAIRED_SESSION_HELPER)
+    # New pairings get a 100-year session instead of 30 days.
+    exchange = re.compile(r'(ttl: hours\(1\)\s*\} : )\{\}(,\s*replaceActiveForSubjectAndMethod: '
+                          r'grant\.method === "desktop-bootstrap",)')
+    if len(exchange.findall(source)) != 1:
+        raise ValueError("unsupported bundle: expected one pairing-link session exchange")
+    source = exchange.sub(r'\1grant.subject === "one-time-token" ? { ttl: T3_ANYWHERE_PAIRED_TTL } : {}\2',
+                          source, count=1)
+    # Sessions paired before the repair carry a signed and a stored 30-day expiry.
+    source = replace_one(
+        source,
+        "if (claims.exp <= observedAt.epochMilliseconds) return yield* new SessionTokenExpiredError({",
+        "if (claims.exp <= observedAt.epochMilliseconds && !t3AnywherePaired(claims)) "
+        "return yield* new SessionTokenExpiredError({",
+    )
+    source = replace_one(
+        source,
+        "if (!connected && row.value.expiresAt.epochMilliseconds <=",
+        "if (!connected && !t3AnywherePaired(row.value) && row.value.expiresAt.epochMilliseconds <=",
+    )
+    source = replace_one(
+        source,
+        "if (row.value.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds) "
+        "return yield* new WebSocketSessionExpiredError({",
+        "if (!t3AnywherePaired(row.value) && row.value.expiresAt.epochMilliseconds <= "
+        "observedAt.epochMilliseconds) return yield* new WebSocketSessionExpiredError({",
+    )
+    # A live socket is closed at its session's expiry; a paired one only on revocation.
+    source = replace_one(
+        source,
+        "const remaining = current.expiresAt.epochMilliseconds - ",
+        "const remaining = t3AnywherePaired(current) ? 2147483647 : current.expiresAt.epochMilliseconds - ",
+    )
+    # `t3 auth session list` and the app's connected-clients list.
+    source = replace_one(
+        source,
+        'AND (expires_at > ${now} OR ${sql.in("session_id", connectedSessionIds)})',
+        "AND (expires_at > ${now} OR (method = 'bearer-access-token' AND subject = 'one-time-token') "
+        'OR ${sql.in("session_id", connectedSessionIds)})',
+    )
+    return source
+
+
+def find_module(archive, header, base, anchor, what):
     found = []
     for name, entry in entries(header):
         if (name.startswith("apps/server/dist/") and name.endswith(".mjs") and "offset" in entry
                 and not entry.get("unpacked")):
-            if RESTART_MODULE_ANCHOR.encode() in read_member(archive, header, base, name):
+            if anchor.encode() in read_member(archive, header, base, name):
                 found.append(name)
     if len(found) != 1:
-        raise ValueError(f"unsupported AppImage: expected one server module with the restart continuation, found {len(found)}")
+        raise ValueError(f"unsupported AppImage: expected one server module with {what}, found {len(found)}")
     return found[0]
+
+
+def restart_module(archive, header, base):
+    """Return the one server module that owns the restart continuation."""
+    return find_module(archive, header, base, RESTART_MODULE_ANCHOR, "the restart continuation")
+
+
+def session_module(archive, header, base):
+    """Return the one server module that verifies session tokens."""
+    return find_module(archive, header, base, SESSION_MODULE_ANCHOR, "the session store")
 
 
 def helper_fingerprint():
@@ -246,20 +320,28 @@ def build(app, state, identity, record, record_path, failed_path, found):
             version = json.loads(read_member(archive, header, base, "package.json"))["version"]
             found["version"] = version
             name = restart_module(archive, header, base)
-            source = read_member(archive, header, base, name).decode()
-            patched = patch_bundle(source, helper)
-            if patched == source:
+            sessions = session_module(archive, header, base)
+            originals_by_module = {module: read_member(archive, header, base, module).decode()
+                                   for module in {name, sessions}}
+            if any(SESSION_MARKER in source for source in originals_by_module.values()):
                 raise ValueError("already repaired AppImage without matching installation record")
-            syntax = work / "check.mjs"
-            syntax.write_text(patched)
+            patched_by_module = dict(originals_by_module)
+            patched_by_module[name] = patch_bundle(patched_by_module[name], helper)
+            if patched_by_module[name] == originals_by_module[name]:
+                raise ValueError("already repaired AppImage without matching installation record")
+            patched_by_module[sessions] = patch_sessions(patched_by_module[sessions])
             # Use the bundled Node runtime; no npm dependency or live T3 state.
             env = {**os.environ, "ELECTRON_RUN_AS_NODE": "1"}
-            subprocess.run([str(root / "t3code"), "--check", str(syntax)], env=env,
-                           stdout=log, stderr=log, check=True)
-            rewrite_member(archive, name, patched.encode())
+            for index, (module, patched) in enumerate(sorted(patched_by_module.items())):
+                syntax = work / f"check-{index}.mjs"
+                syntax.write_text(patched)
+                subprocess.run([str(root / "t3code"), "--check", str(syntax)], env=env,
+                               stdout=log, stderr=log, check=True)
+                rewrite_member(archive, module, patched.encode())
             check_header, check_base = read_asar(archive)
-            if read_member(archive, check_header, check_base, name) != patched.encode():
-                raise ValueError("ASAR verification failed")
+            for module, patched in patched_by_module.items():
+                if read_member(archive, check_header, check_base, module) != patched.encode():
+                    raise ValueError("ASAR verification failed")
             offset = int(subprocess.check_output([str(build_app), "--appimage-offset"], text=True).strip())
             squash = work / "root.squashfs"
             subprocess.run(["mksquashfs", str(root), str(squash), "-noappend", "-all-root",
@@ -296,7 +378,7 @@ def build(app, state, identity, record, record_path, failed_path, found):
             record = {
                 "patchLevel": PATCH_LEVEL, "version": version,
                 "originalSha256": original_sha, "installedSha256": repaired_sha,
-                "backup": str(backup), "installedAt": now(), "module": name,
+                "backup": str(backup), "installedAt": now(), "module": name, "sessionModule": sessions,
                 "identity": [stamp.st_ino, stamp.st_size, stamp.st_mtime_ns],
             }
             write_json(record_path, record)

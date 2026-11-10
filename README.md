@@ -107,6 +107,17 @@ AppImage identity, `appVersion`, `error`, `at` and the helper's `helperSha256`; 
 updated helper therefore retries a bundle that an older helper refused. This helper does not modify a
 signed macOS app or a headless T3 installation.
 
+Patch level 3 (owner request, 2026-11-10) also keeps paired devices signed in. Upstream gives a
+session from a pairing link 30 days, with no renewal, so every phone or computer route would need a
+new pairing each month. With the repair, a pairing-link session (bearer, subject `one-time-token`)
+is valid until it is revoked. Sessions paired before the repair are covered too: their signed and
+stored 30-day expiry is ignored, and `t3 auth session list` still shows that old date. New pairings
+get a 100-year session. CLI-issued tokens (`t3 auth session issue`), browser cookies and DPoP tokens
+keep their lifetimes. Revoking (`t3 auth session revoke`, or the app's client list) still ends a
+session immediately. Verified on 0.1.8-nightly.20261109.4433 against a throwaway server: an expired
+paired session kept HTTP and WebSocket access, an expired CLI token was refused, and revocation
+ended both. The code is in the one server chunk that defines `SessionStore.verify`.
+
 Check the installed app:
 
 ```sh
