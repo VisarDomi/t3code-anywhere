@@ -204,6 +204,18 @@ console.log(JSON.stringify([
 ].map(t3AnywherePaired)));"""))
         self.assertEqual(verdicts, [True, True, False, False, False, False])
 
+    def test_mac_load_time_patch_matches_the_appimage_patch(self):
+        # macos/paired-sessions.mjs patches the Mac's server in memory; it must make the same edit.
+        script = (f"import {{ patchSessions }} from {json.dumps((ROOT / 'macos/paired-sessions.mjs').as_uri())};\n"
+                  "const input = JSON.parse(require_input());\n"
+                  "const out = input.map((s) => { try { return patchSessions(s); } catch (e) { return null; } });\n"
+                  "console.log(JSON.stringify(out));\n")
+        cases = [SESSION_FIXTURE, SESSION_FIXTURE.replace("days(30)", "days(31)"), SESSION_FIXTURE + SESSION_FIXTURE]
+        script = script.replace("require_input()", json.dumps(json.dumps(cases)))
+        mac = json.loads(node(script))
+        self.assertEqual(mac[0], repair.patch_sessions(SESSION_FIXTURE))
+        self.assertEqual(mac[1:], [None, None])
+
     def test_session_patch_refuses_unrecognized_code(self):
         for changed in (SESSION_FIXTURE.replace("days(30)", "days(31)"),
                         SESSION_FIXTURE.replace("ttl: hours(1)", "ttl: hours(2)"),
