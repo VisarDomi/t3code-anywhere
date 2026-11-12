@@ -10,11 +10,13 @@ Supported layouts: the single server bundle of 0.1.7-nightly.20261101.4016
 0.1.8-nightly.20261109.4399 (`apps/server/dist/runtimeLayer-*.mjs`). The patched
 module is the one server chunk that defines the restart continuation.
 
-Patch level 3 adds the owner-requested paired-device sessions (2026-11-10): a
-session from a pairing link (bearer, subject `one-time-token`) no longer expires,
-including the 30-day sessions issued before the repair. Revocation still ends it.
-CLI-issued tokens, browser cookies and DPoP tokens keep their lifetimes. That code
-is in the one server chunk that defines `SessionStore.verify`.
+Pairing mode (owner request, 2026-11-12) is off unless switched on with
+`--pairing-mode on`, and switches itself off after 24 hours. While it is on, the
+build also makes a pairing link hand out a 100-year session instead of 30 days
+(one edit in the server chunk that defines `SessionStore.verify`). T3 honours the
+expiry it signed, so a device paired in that mode stays signed in on every later,
+unmodified build; nothing has to be re-applied after an update. Pair, switch it
+off, done: the normal build contains no session change.
 """
 
 import argparse
@@ -30,7 +32,7 @@ import subprocess
 import tempfile
 import time
 
-PATCH_LEVEL = 3
+PATCH_LEVEL = 4
 MARKER = "// t3code-anywhere power recovery v2"
 SESSION_MARKER = "// t3code-anywhere paired sessions v1"
 HERE = Path(__file__).resolve().parent
@@ -38,11 +40,10 @@ RESTART_MODULE_ANCHOR = 'fn("RestartContinuation.continueRestartedRun")'
 SESSION_MODULE_ANCHOR = 'fn("SessionStore.verify")'
 PAIRED_SESSION_HELPER = (
     SESSION_MARKER + "\n"
-    "// A device paired with a pairing link keeps its session until it is revoked.\n"
+    "// Pairing mode: a device paired now keeps its session until it is revoked.\n"
     "const T3_ANYWHERE_PAIRED_TTL = days(36500);\n"
-    "const t3AnywherePaired = (session) => session.method === \"bearer-access-token\" && "
-    "(session.subject ?? session.sub) === \"one-time-token\";\n"
 )
+PAIRING_MODE_HOURS = 24
 OLD_CONTINUE_PROMPT = "Continue where you left off. Your last turn was cut short, so a command or other action it started may have finished or may still be running. Before you repeat one that changes state, confirm it did not take effect and is not still running; if you cannot tell, say so instead of repeating it."
 
 
@@ -73,16 +74,17 @@ def patch_bundle(source, helper):
     # the effect worker's ordinary five-attempt failure budget.
     # The bundler's collision suffixes differ between layouts (tapError$1/void_$1
     # in the single bundle, tapError/void_ in the split chunk); the code is the same.
+    # 20261112 passes the run as `{ sourceRunId }` instead of `sourceRunId`.
     retry_tap = re.compile(
         r"(tapError(?:\$\d+)?)\(\(\) => willRetry \? (void_(?:\$\d+)?) : "
-        r"threads\.recoverDelegatedTask\(effect\.threadId, sourceRunId\)\)")
+        r"threads\.recoverDelegatedTask\(effect\.threadId, (sourceRunId|\{ sourceRunId \})\)\)")
     matches = retry_tap.findall(source)
     if len(matches) != 1:
         raise ValueError(f"unsupported bundle: expected one delegated-task recovery tapError, found {len(matches)}")
-    tap, void = matches[0]
+    tap, void, run = matches[0]
     source = retry_tap.sub(
         lambda _: f'{tap}((cause) => willRetry || t3RecoveryWaiting("provider-runtime.continue", cause) '
-                  f'? {void} : threads.recoverDelegatedTask(effect.threadId, sourceRunId))',
+                  f'? {void} : threads.recoverDelegatedTask(effect.threadId, {run}))',
         source, count=1)
     source = replace_one(
         source,
@@ -100,53 +102,32 @@ def patch_bundle(source, helper):
 
 
 def patch_sessions(source):
-    """Paired devices keep their sessions until revoked (owner request, 2026-11-10)."""
+    """Pairing mode: a pairing link issues a 100-year session instead of 30 days."""
     if SESSION_MARKER in source:
         return source
     if not re.search(r"\bas days\b", source):
         raise ValueError("unsupported bundle: missing Duration.days import")
     source = replace_one(source, "const DEFAULT_SESSION_TTL = days(30);\n",
                          "const DEFAULT_SESSION_TTL = days(30);\n" + PAIRED_SESSION_HELPER)
-    # New pairings get a 100-year session instead of 30 days.
     exchange = re.compile(r'(ttl: hours\(1\)\s*\} : )\{\}(,\s*replaceActiveForSubjectAndMethod: '
                           r'grant\.method === "desktop-bootstrap",)')
     if len(exchange.findall(source)) != 1:
         raise ValueError("unsupported bundle: expected one pairing-link session exchange")
-    source = exchange.sub(r'\1grant.subject === "one-time-token" ? { ttl: T3_ANYWHERE_PAIRED_TTL } : {}\2',
-                          source, count=1)
-    # Sessions paired before the repair carry a signed and a stored 30-day expiry.
-    source = replace_one(
-        source,
-        "if (claims.exp <= observedAt.epochMilliseconds) return yield* new SessionTokenExpiredError({",
-        "if (claims.exp <= observedAt.epochMilliseconds && !t3AnywherePaired(claims)) "
-        "return yield* new SessionTokenExpiredError({",
-    )
-    source = replace_one(
-        source,
-        "if (!connected && row.value.expiresAt.epochMilliseconds <=",
-        "if (!connected && !t3AnywherePaired(row.value) && row.value.expiresAt.epochMilliseconds <=",
-    )
-    source = replace_one(
-        source,
-        "if (row.value.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds) "
-        "return yield* new WebSocketSessionExpiredError({",
-        "if (!t3AnywherePaired(row.value) && row.value.expiresAt.epochMilliseconds <= "
-        "observedAt.epochMilliseconds) return yield* new WebSocketSessionExpiredError({",
-    )
-    # A live socket is closed at its session's expiry; a paired one only on revocation.
-    source = replace_one(
-        source,
-        "const remaining = current.expiresAt.epochMilliseconds - ",
-        "const remaining = t3AnywherePaired(current) ? 2147483647 : current.expiresAt.epochMilliseconds - ",
-    )
-    # `t3 auth session list` and the app's connected-clients list.
-    source = replace_one(
-        source,
-        'AND (expires_at > ${now} OR ${sql.in("session_id", connectedSessionIds)})',
-        "AND (expires_at > ${now} OR (method = 'bearer-access-token' AND subject = 'one-time-token') "
-        'OR ${sql.in("session_id", connectedSessionIds)})',
-    )
-    return source
+    return exchange.sub(r'\1grant.subject === "one-time-token" ? { ttl: T3_ANYWHERE_PAIRED_TTL } : {}\2',
+                        source, count=1)
+
+
+def pairing_mode(state):
+    """True while the owner's pairing-mode switch is on; it expires by itself."""
+    marker = state / "pairing-mode"
+    try:
+        age = time.time() - marker.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    if age > PAIRING_MODE_HOURS * 3600:
+        marker.unlink(missing_ok=True)
+        return False
+    return True
 
 
 def find_module(archive, header, base, anchor, what):
@@ -272,30 +253,33 @@ def apply(app, state):
         stamp = app.stat()
         identity = [stamp.st_ino, stamp.st_size, stamp.st_mtime_ns]
         record_path = state / "installed.json"
+        pairing = pairing_mode(state)
         record = None
         if record_path.exists():
             record = json.loads(record_path.read_text())
-            if record.get("identity") == identity and record.get("patchLevel") == PATCH_LEVEL:
+            if (record.get("identity") == identity and record.get("patchLevel") == PATCH_LEVEL
+                    and record.get("pairingMode", False) == pairing):
                 return record
         failed_path = state / "failed.json"
         fingerprint = helper_fingerprint()
         if failed_path.exists():
             failed = json.loads(failed_path.read_text())
             if (failed.get("identity") == identity and failed.get("patchLevel") == PATCH_LEVEL
-                    and failed.get("helperSha256") == fingerprint):
+                    and failed.get("helperSha256") == fingerprint
+                    and failed.get("pairingMode", False) == pairing):
                 raise ValueError(f"previous repair refused this AppImage: {failed['error']}")
         found = {"version": None}
         try:
-            return build(app, state, identity, record, record_path, failed_path, found)
+            return build(app, state, identity, record, record_path, failed_path, found, pairing)
         except Exception as error:
             # Monitors read this file: it names the exact AppImage that runs unrepaired.
             write_json(failed_path, {"identity": identity, "patchLevel": PATCH_LEVEL,
-                                     "error": str(error), "at": now(),
+                                     "pairingMode": pairing, "error": str(error), "at": now(),
                                      "appVersion": found["version"], "helperSha256": fingerprint})
             raise
 
 
-def build(app, state, identity, record, record_path, failed_path, found):
+def build(app, state, identity, record, record_path, failed_path, found, pairing=False):
     helper = (HERE / "power-recovery.js").read_text()
     current_sha = digest(app)
     build_app = app
@@ -320,16 +304,17 @@ def build(app, state, identity, record, record_path, failed_path, found):
             version = json.loads(read_member(archive, header, base, "package.json"))["version"]
             found["version"] = version
             name = restart_module(archive, header, base)
-            sessions = session_module(archive, header, base)
+            sessions = session_module(archive, header, base) if pairing else None
             originals_by_module = {module: read_member(archive, header, base, module).decode()
-                                   for module in {name, sessions}}
+                                   for module in {name, sessions} - {None}}
             if any(SESSION_MARKER in source for source in originals_by_module.values()):
                 raise ValueError("already repaired AppImage without matching installation record")
             patched_by_module = dict(originals_by_module)
             patched_by_module[name] = patch_bundle(patched_by_module[name], helper)
             if patched_by_module[name] == originals_by_module[name]:
                 raise ValueError("already repaired AppImage without matching installation record")
-            patched_by_module[sessions] = patch_sessions(patched_by_module[sessions])
+            if pairing:
+                patched_by_module[sessions] = patch_sessions(patched_by_module[sessions])
             # Use the bundled Node runtime; no npm dependency or live T3 state.
             env = {**os.environ, "ELECTRON_RUN_AS_NODE": "1"}
             for index, (module, patched) in enumerate(sorted(patched_by_module.items())):
@@ -378,7 +363,8 @@ def build(app, state, identity, record, record_path, failed_path, found):
             record = {
                 "patchLevel": PATCH_LEVEL, "version": version,
                 "originalSha256": original_sha, "installedSha256": repaired_sha,
-                "backup": str(backup), "installedAt": now(), "module": name, "sessionModule": sessions,
+                "backup": str(backup), "installedAt": now(), "module": name,
+                "pairingMode": pairing, "sessionModule": sessions,
                 "identity": [stamp.st_ino, stamp.st_size, stamp.st_mtime_ns],
             }
             write_json(record_path, record)
@@ -419,7 +405,16 @@ def main():
     parser.add_argument("--app", type=Path, default=Path.home() / "Applications/T3-Code.AppImage")
     parser.add_argument("--state", type=Path, default=Path.home() / ".local/share/t3code-power-recovery")
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--pairing-mode", choices=("on", "off"),
+                        help="on: the next T3 start issues 100-year sessions to newly paired devices, "
+                             f"for {PAIRING_MODE_HOURS} hours; off: back to the normal build. Restart T3 after each.")
     args = parser.parse_args()
+    if args.pairing_mode:
+        args.state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if args.pairing_mode == "on":
+            (args.state / "pairing-mode").touch()
+        else:
+            (args.state / "pairing-mode").unlink(missing_ok=True)
     if args.status:
         print(json.dumps(status(args.app, args.state), indent=2))
     else:

@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import time
 import os
 from pathlib import Path
 import struct
@@ -41,7 +42,11 @@ SPLIT_FIXTURE = (FIXTURE
                           'import { vs as tapError, ws as tryPromise, } from "./Schema-D36BDnNk.mjs";\n'
                           'const used = tryPromise({ try: async () => 1, catch: (cause) => cause });')
                  .replace("tapError$1(() => willRetry ? void_$1 :", "tapError(() => willRetry ? void_ :"))
-LAYOUTS = {"0.1.7-nightly.20261101.4016": FIXTURE, "0.1.8-nightly.20261109.4399": SPLIT_FIXTURE}
+# 0.1.10-nightly.20261112.4580 passes the source run as an object.
+OBJECT_RUN_FIXTURE = SPLIT_FIXTURE.replace("recoverDelegatedTask(effect.threadId, sourceRunId)",
+                                           "recoverDelegatedTask(effect.threadId, { sourceRunId })")
+LAYOUTS = {"0.1.7-nightly.20261101.4016": FIXTURE, "0.1.8-nightly.20261109.4399": SPLIT_FIXTURE,
+           "0.1.10-nightly.20261112.4580": OBJECT_RUN_FIXTURE}
 
 # The session code of 0.1.8-nightly.20261109.4433 (apps/server/dist/relayTracing-*.mjs),
 # with unrelated module code omitted.
@@ -112,8 +117,9 @@ const run = () => adapter.startTurn({restartContinuationOfRunId:'cut-run', messa
                 self.assertIn("yield* tryPromise({ try: t3RecoveryWaitForInternet", patched)
                 tap = "tapError$1" if "tapError$1" in fixture else "tapError"
                 void = "void_$1" if "void_$1" in fixture else "void_"
+                run = "{ sourceRunId }" if "{ sourceRunId }" in fixture else "sourceRunId"
                 self.assertIn(f'{tap}((cause) => willRetry || t3RecoveryWaiting("provider-runtime.continue", cause) '
-                              f'? {void} : threads.recoverDelegatedTask(effect.threadId, sourceRunId))', patched)
+                              f'? {void} : threads.recoverDelegatedTask(effect.threadId, {run}))', patched)
                 self.assertEqual(patched.count(repair.MARKER), 1)
 
     def test_offline_wait_has_no_attempt_limit_and_rejects_captive_portals(self):
@@ -176,33 +182,33 @@ assert.equal(calls, 2);
             with self.assertRaises(ValueError):
                 repair.patch_bundle(fixture.replace("willRetry ? void_", "willRetry ? other_"), HELPER)
 
-    def test_paired_sessions_never_expire_but_other_sessions_do(self):
+    def test_pairing_mode_issues_long_sessions_and_leaves_validation_alone(self):
         patched = repair.patch_sessions(SESSION_FIXTURE)
         self.assertEqual(repair.patch_sessions(patched), patched)
-        # New pairings: 100 years; DPoP keeps one hour; the dev and WebSocket-ticket checks stay.
+        # New pairings: 100 years; DPoP keeps one hour.
         self.assertIn('} : grant.subject === "one-time-token" ? { ttl: T3_ANYWHERE_PAIRED_TTL } : {},', patched)
         self.assertIn("ttl: hours(1)", patched)
-        self.assertIn("if (claims.exp <= observedAt.epochMilliseconds) return yield* new WebSocketTokenExpiredError", patched)
-        self.assertIn("\t\t\tif (row.value.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds) "
-                      "return yield* new SessionTokenExpiredError", patched)
-        for guarded in ("claims.exp <= observedAt.epochMilliseconds && !t3AnywherePaired(claims)",
-                        "!connected && !t3AnywherePaired(row.value) &&",
-                        "!t3AnywherePaired(row.value) && row.value.expiresAt.epochMilliseconds <= observedAt."
-                        "epochMilliseconds) return yield* new WebSocketSessionExpiredError",
-                        "t3AnywherePaired(current) ? 2147483647 :",
-                        "OR (method = 'bearer-access-token' AND subject = 'one-time-token') OR"):
-            self.assertIn(guarded, patched)
-        predicate = repair.PAIRED_SESSION_HELPER.replace("days(36500)", "36500")
-        verdicts = json.loads(node(predicate + """
-console.log(JSON.stringify([
-  {method: "bearer-access-token", subject: "one-time-token"},
-  {method: "bearer-access-token", sub: "one-time-token"},
-  {method: "bearer-access-token", subject: "cli-issued-session"},
-  {method: "bearer-access-token", subject: "desktop-bootstrap"},
-  {method: "dpop-access-token", subject: "one-time-token"},
-  {method: "browser-session-cookie", subject: "one-time-token"},
-].map(t3AnywherePaired)));"""))
-        self.assertEqual(verdicts, [True, True, False, False, False, False])
+        self.assertIn("const T3_ANYWHERE_PAIRED_TTL = days(36500);", patched)
+        # Every expiry check is upstream's: a device stays signed in because its session
+        # really lasts that long, so an unmodified build accepts it too.
+        added = [line for line in patched.splitlines() if line not in SESSION_FIXTURE.splitlines()]
+        self.assertEqual(len(added), 4, added)
+        for check in ("claims.exp <= observedAt", "expiresAt.epochMilliseconds <=", "expires_at > ${now}",
+                      "const remaining = current.expiresAt"):
+            self.assertEqual([line for line in patched.splitlines() if check in line],
+                             [line for line in SESSION_FIXTURE.splitlines() if check in line])
+
+    def test_pairing_mode_is_off_by_default_and_expires(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            self.assertFalse(repair.pairing_mode(state))
+            marker = state / "pairing-mode"
+            marker.touch()
+            self.assertTrue(repair.pairing_mode(state))
+            old = time.time() - (repair.PAIRING_MODE_HOURS * 3600 + 60)
+            os.utime(marker, (old, old))
+            self.assertFalse(repair.pairing_mode(state))
+            self.assertFalse(marker.exists())
 
     def test_mac_load_time_patch_matches_the_appimage_patch(self):
         # macos/paired-sessions.mjs patches the Mac's server in memory; it must make the same edit.
@@ -219,7 +225,6 @@ console.log(JSON.stringify([
     def test_session_patch_refuses_unrecognized_code(self):
         for changed in (SESSION_FIXTURE.replace("days(30)", "days(31)"),
                         SESSION_FIXTURE.replace("ttl: hours(1)", "ttl: hours(2)"),
-                        SESSION_FIXTURE.replace("const remaining = current.", "const left = current."),
                         SESSION_FIXTURE.replace("nf as days", "nf as durationDays"),
                         SESSION_FIXTURE + SESSION_FIXTURE):
             with self.assertRaises(ValueError):
@@ -270,6 +275,7 @@ console.log(JSON.stringify([
             stamp = app.stat()
             self.assertEqual(failed["identity"], [stamp.st_ino, stamp.st_size, stamp.st_mtime_ns])
             self.assertEqual(failed["patchLevel"], repair.PATCH_LEVEL)
+            self.assertFalse(failed["pairingMode"])
             self.assertEqual(failed["helperSha256"], repair.helper_fingerprint())
             self.assertIn("at", failed)
             self.assertIn("appVersion", failed)

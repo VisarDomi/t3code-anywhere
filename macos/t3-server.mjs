@@ -1,16 +1,19 @@
-// Runs the Mac's T3 Code server as a background service, with paired-device sessions
-// that never expire (t3code-anywhere, owner request 2026-11-10).
+// Pairing mode for the Mac (t3code-anywhere, owner request 2026-11-12); started and stopped
+// by pairing-mode.sh.
+//
+// Runs the Mac's T3 Code server in place of the desktop app's own, on the same data, with
+// one change: a device paired through a pairing link gets a 100-year session instead of
+// 30 days (paired-sessions.mjs). T3 honours the expiry it signed, so those devices stay
+// signed in on the normal app afterwards.
 //
 // The signed app is not modified. Electron strips --import from NODE_OPTIONS in a
-// packaged app, so the desktop app's own server cannot be patched without editing the
+// packaged app, so the desktop app's own server cannot be changed without editing the
 // bundle. This script is started with the app's own binary in Node mode
 // (ELECTRON_RUN_AS_NODE=1, like the `t3` command), registers a module hook that patches
 // the session module in memory as it loads, then starts the app's server entry.
 //
 // A changed upstream layout is recorded in the status file and the server starts
-// unpatched: remote access then follows upstream's 30-day sessions until the patch is
-// updated. When the app is updated on disk, the server exits so launchd restarts it on
-// the new release, patched again.
+// unpatched; pairing-mode.sh then switches pairing mode off again.
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -25,7 +28,7 @@ const resources = process.env.T3_ANYWHERE_RESOURCES ?? path.join(app, "Contents/
 const asar = path.join(resources, "app.asar");
 const entry = path.join(asar, "apps/server/dist/bin.mjs");
 const statusFile = process.env.T3_ANYWHERE_STATUS ??
-  path.join(os.homedir(), ".local/share/t3code-server/status.json");
+  path.join(os.homedir(), ".local/share/t3code-pairing/status.json");
 const releaseMarker = process.env.T3_ANYWHERE_RELEASE_MARKER ?? path.join(app, "Contents/Info.plist");
 
 function readVersion() {
@@ -49,7 +52,7 @@ function writeStatus(data) {
     fs.writeFileSync(temp, JSON.stringify({ ...data, version, pid: process.pid, at: new Date().toISOString() }, null, 2) + "\n");
     fs.renameSync(temp, statusFile);
   } catch (error) {
-    console.error(`t3code-server: could not write ${statusFile}: ${error.message}`);
+    console.error(`t3code-pairing: could not write ${statusFile}: ${error.message}`);
   }
 }
 
@@ -67,7 +70,7 @@ registerHooks({
       writeStatus({ ok: true, state: "patched", module });
       return { ...result, source };
     } catch (error) {
-      console.error(`t3code-server: session patch refused for ${module}: ${error.message}`);
+      console.error(`t3code-pairing: session patch refused for ${module}: ${error.message}`);
       writeStatus({ ok: false, state: "refused", module, error: error.message });
       return result;
     }
@@ -87,7 +90,7 @@ const startedRelease = releaseIdentity();
 setInterval(() => {
   const current = releaseIdentity();
   if (startedRelease && current && current !== startedRelease) {
-    console.error("t3code-server: the app was updated; restarting on the new release");
+    console.error("t3code-pairing: the app was updated; restarting on the new release");
     process.kill(process.pid, "SIGTERM");
   }
 }, 60_000).unref();
@@ -110,7 +113,7 @@ function ownerPid() {
 if (process.argv[2] === "serve") {
   for (let pid = ownerPid(), told = false; pid !== null; pid = ownerPid()) {
     if (!told) {
-      writeStatus({ ok: false, state: "waiting", error: `T3 server ${pid} owns the data folder; switch off Local environment in the desktop app` });
+      writeStatus({ ok: false, state: "waiting", error: `T3 server ${pid} owns the data folder; quit T3 Code first` });
       told = true;
     }
     await new Promise((resolve) => setTimeout(resolve, 15_000));
@@ -123,7 +126,7 @@ const bin = fs.readFileSync(entry, "utf8");
 const chunks = [...bin.matchAll(/import\("\.\/(binMain-[\w-]+\.mjs)"\)/g)].map((match) => match[1]);
 if (chunks.length !== 1 || !bin.includes("runCliCommand")) {
   writeStatus({ ok: false, state: "unsupported-entry", error: `expected one CLI chunk in bin.mjs, found ${chunks.length}` });
-  throw new Error("t3code-server: unsupported bin.mjs layout");
+  throw new Error("t3code-pairing: unsupported bin.mjs layout");
 }
 process.argv[1] = entry;
 const { runCliCommand } = await import(pathToFileURL(path.join(path.dirname(entry), chunks[0])).href);

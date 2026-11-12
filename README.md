@@ -107,16 +107,39 @@ AppImage identity, `appVersion`, `error`, `at` and the helper's `helperSha256`; 
 updated helper therefore retries a bundle that an older helper refused. This helper does not modify a
 signed macOS app or a headless T3 installation.
 
-Patch level 3 (owner request, 2026-11-10) also keeps paired devices signed in. Upstream gives a
-session from a pairing link 30 days, with no renewal, so every phone or computer route would need a
-new pairing each month. With the repair, a pairing-link session (bearer, subject `one-time-token`)
-is valid until it is revoked. Sessions paired before the repair are covered too: their signed and
-stored 30-day expiry is ignored, and `t3 auth session list` still shows that old date. New pairings
-get a 100-year session. CLI-issued tokens (`t3 auth session issue`), browser cookies and DPoP tokens
-keep their lifetimes. Revoking (`t3 auth session revoke`, or the app's client list) still ends a
-session immediately. Verified on 0.1.8-nightly.20261109.4433 against a throwaway server: an expired
-paired session kept HTTP and WebSocket access, an expired CLI token was refused, and revocation
-ended both. The code is in the one server chunk that defines `SessionStore.verify`.
+### Pairing mode: devices that stay signed in
+
+Upstream gives a session from a pairing link 30 days with no renewal, on every route (LAN,
+Tailscale or a public URL), so each phone or computer route needs a new pairing every month.
+T3 honours the expiry it signed into a session, so the fix is needed only at the moment of
+pairing: a device paired while pairing mode is on gets a 100-year session, and every later,
+unmodified T3 accepts it. Nothing is re-applied after an update, and the normal build contains
+no session change. Revoking (`t3 auth session revoke`, or the app's client list) still ends a
+session immediately.
+
+```sh
+# Linux host: on, restart T3, pair, off. It switches itself off after 24 hours.
+python3 ~/.local/lib/t3code-power-recovery/power-recovery.py --pairing-mode on
+python3 ~/.local/lib/t3code-power-recovery/power-recovery.py --pairing-mode off
+
+# Mac host: quit T3 Code, then
+sh macos/pairing-mode.sh on
+sh macos/pairing-mode.sh off
+```
+
+Each route of a device is its own pairing (**Routes → Add route** in the receiving app; a
+`t3code://pair` link is refused for an environment that is already saved). Give codes one at a
+time. Afterwards `t3 auth session list` must show the new sessions expiring about 100 years out;
+revoke the sessions they replaced. A device paired outside pairing mode simply gets upstream's
+30 days.
+
+Verified on 0.1.10-nightly.20261112.4580 with a throwaway server: a session paired in pairing
+mode kept HTTP and WebSocket access after the server was restarted unmodified, and a pairing on
+the unmodified server got 30 days. The edit is one line in the server chunk that defines
+`SessionStore.verify`. On the Mac the signed app is not modified: `macos/t3-server.mjs` runs the
+app's own server binary with that module patched in memory, as a temporary job that a restart
+of the Mac also ends. `macos/pairing-mode.sh` has not been run end to end yet; the server it
+starts was used for the 2026-11-12 pairing.
 
 Check the installed app:
 
