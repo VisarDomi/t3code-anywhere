@@ -6,6 +6,14 @@ Read README.md, ROAMING.md and the relevant linux/, macos/ or tools/ script befo
 Discover existing hosts, pinned identities, credentials and routes before asking
 the owner. Stable is default for new setups; preserve the chosen track everywhere.
 
+## This owner's machines since 2026-11-12
+
+Tailscale is removed from the owner's PC, Mac and phone at his request: never reinstall or
+re-enable it there, and do not "repair" a missing tailnet. T3 away from home goes through his
+own relay with sessions paired in pairing mode (README, "Pairing mode"); the values are in the
+private environment repo (`t3code/README.md`). The Tailscale wording below describes the
+general project and other installations.
+
 ## Invariants
 
 - Private LAN/tailnet only. Phone VPN stays off at home, on at coffee; computers'
