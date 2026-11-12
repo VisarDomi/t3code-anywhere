@@ -82,5 +82,12 @@ for pid in $(command -v fuser >/dev/null && fuser "$lock" 2>/dev/null); do
     grep -q t3code-keepalive "/proc/$pid/cmdline" 2>/dev/null && kill "$pid"
 done
 sleep 1
-setsid "$HOME/.local/bin/t3code-keepalive" >/dev/null 2>&1 </dev/null &
+# Run from a T3 agent's shell, a plain background process stays in that agent's cgroup and is
+# killed when the agent's session ends, leaving no watcher until the next login. Its own scope
+# under the user manager survives; at login the autostart entry starts it as before.
+if command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+    systemd-run --user --scope --quiet --collect setsid -f "$HOME/.local/bin/t3code-keepalive" >/dev/null 2>&1 </dev/null
+else
+    setsid "$HOME/.local/bin/t3code-keepalive" >/dev/null 2>&1 </dev/null &
+fi
 echo "T3 Code AppImage: $app; watcher started (starts T3 if it is not running)."
