@@ -13,6 +13,8 @@
 #                       Tailscale, while other networks (a coffee shop's Wi-Fi) are kept
 #                       out by the packet filter. Tailscale and loopback (where Tailscale
 #                       Serve delivers) always pass. Closed until home is confirmed.
+#   TAILNET=no          A Mac without Tailscale: away from home only loopback passes. Some
+#                       public networks hand out 100.64.0.0/10 addresses themselves.
 #   SERVICE=Wi-Fi IFACE=en0 HOME_IP=192.168.1.50
 #                       A fixed Wi-Fi address only at home, DHCP elsewhere: macOS applies
 #                       a service's address on every network, so a laptop with a fixed
@@ -41,11 +43,12 @@ if [ "${T3_LAN:-no}" = yes ]; then
     if [ "$home" = yes ] && [ "$closed" = yes ]; then
         pfctl -a "$ANCHOR" -F rules >/dev/null 2>&1 && log "home: T3 Code reachable on the LAN"
     elif [ "$home" = no ] && [ "$closed" = no ]; then
-        printf '%s\n' \
-            "pass in quick on lo0 proto tcp to any port $PORTS" \
-            "pass in quick proto tcp from any to { 100.64.0.0/10, fd7a:115c:a1e0::/48 } port $PORTS" \
-            "block drop in quick proto tcp to any port $PORTS" |
-            pfctl -a "$ANCHOR" -f - >/dev/null 2>&1 && log "away: T3 Code closed to the LAN"
+        {
+            echo "pass in quick on lo0 proto tcp to any port $PORTS"
+            [ "${TAILNET:-yes}" = no ] ||
+                echo "pass in quick proto tcp from any to { 100.64.0.0/10, fd7a:115c:a1e0::/48 } port $PORTS"
+            echo "block drop in quick proto tcp to any port $PORTS"
+        } | pfctl -a "$ANCHOR" -f - >/dev/null 2>&1 && log "away: T3 Code closed to the LAN"
     fi
 fi
 

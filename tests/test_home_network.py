@@ -43,6 +43,32 @@ if name=='networksetup':
                 subprocess.run(['/bin/sh',str(test_script)],env=env,check=True,capture_output=True,timeout=8)
             return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
+    def away_rules(self, extra=''):
+        """The packet-filter rules written away from home, with pfctl replaced by a recorder."""
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); commands=root/'bin';commands.mkdir()
+            conf=root/'config';rules=root/'rules'
+            conf.write_text('ROUTER=192.168.1.1\nROUTER_MAC=aa:bb:cc:dd:ee:ff\nT3_LAN=yes\n'+extra)
+            (commands/'pfctl').write_text('#!/bin/sh\ncase "$*" in *"-f -"*) cat > "$RULES";; *"-s info"*) echo "Status: Enabled";; esac\n')
+            (commands/'ping').write_text('#!/bin/sh\nexit 1\n')
+            (commands/'logger').write_text('#!/bin/sh\n')
+            for command in commands.iterdir(): command.chmod(0o755)
+            script=root/'policy';script.write_text(SCRIPT.read_text().replace('conf=/usr/local/etc/home-network.conf',f'conf={conf}'))
+            subprocess.run(['/bin/sh',str(script)],env=dict(os.environ,PATH=str(commands)+os.pathsep+os.environ['PATH'],RULES=str(rules)),
+                           check=True,capture_output=True,timeout=8)
+            return rules.read_text().splitlines()
+
+    def test_away_from_home_only_loopback_and_the_tailnet_reach_t3(self):
+        rules=self.away_rules()
+        self.assertEqual(len(rules),3)
+        self.assertIn('100.64.0.0/10',rules[1])
+        self.assertTrue(rules[2].startswith('block drop in quick'))
+
+    def test_a_mac_without_tailscale_passes_only_loopback(self):
+        rules=self.away_rules('TAILNET=no\n')
+        self.assertEqual(rules,['pass in quick on lo0 proto tcp to any port 3773:3799',
+                                'block drop in quick proto tcp to any port 3773:3799'])
+
     def test_live_home_gateway_keeps_fixed_address(self):
         self.assertEqual(self.run_policy(),[])
 
