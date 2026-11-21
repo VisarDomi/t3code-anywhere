@@ -60,6 +60,8 @@ install -d "$HOME/.local/bin" "$HOME/.config/autostart"
 install -d "$HOME/.local/lib/t3code-power-recovery"
 install -m 755 "$here/power-recovery.py" "$HOME/.local/lib/t3code-power-recovery/power-recovery.py"
 install -m 644 "$here/power-recovery.js" "$HOME/.local/lib/t3code-power-recovery/power-recovery.js"
+# Where a refused T3 build gets ported (power-recovery.py request_port).
+(cd "$here/.." && pwd) > "$HOME/.local/lib/t3code-power-recovery/source"
 install -m 755 "$here/../t3code-keepalive" "$HOME/.local/bin/t3code-keepalive.new"
 mv -f "$HOME/.local/bin/t3code-keepalive.new" "$HOME/.local/bin/t3code-keepalive"
 # T3 writes ~/.t3/bin/t3 on its first run; run this script again afterwards if missing.

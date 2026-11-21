@@ -6,9 +6,17 @@ retained outside the checkout. A changed upstream layout is an error, not a best
 effort binary edit. A mounted, running AppImage keeps its original inode.
 
 Supported layouts: the single server bundle of 0.1.7-nightly.20261101.4016
-(`apps/server/dist/binCli-*.mjs`) and the code-split bundle of
-0.1.8-nightly.20261109.4399 (`apps/server/dist/runtimeLayer-*.mjs`). The patched
-module is the one server chunk that defines the restart continuation.
+(`apps/server/dist/binCli-*.mjs`), the code-split bundle of
+0.1.8-nightly.20261109.4399 (`apps/server/dist/runtimeLayer-*.mjs`), and
+0.1.11-nightly.20261119.4928, whose Codex adapter moved to its own chunk
+(`apps/server/dist/server-*.mjs`) and whose retry exhaustion gained conditions. The
+patched modules are the one server chunk that defines the restart continuation and
+the one that starts a Codex turn (the same chunk before 20261119).
+
+A build this helper refuses is ported automatically: the refusal starts one T3 thread
+on this machine (`t3 thread start`) that ports the helper in its source checkout,
+tests, installs and applies it (see `request_port`; `no-auto-port` in the state
+folder switches that off).
 
 Pairing mode (owner request, 2026-11-12) is off unless switched on with
 `--pairing-mode on`, and switches itself off after 24 hours. While it is on, the
@@ -32,12 +40,26 @@ import subprocess
 import tempfile
 import time
 
-PATCH_LEVEL = 4
+PATCH_LEVEL = 5
 MARKER = "// t3code-anywhere power recovery v2"
 SESSION_MARKER = "// t3code-anywhere paired sessions v1"
 HERE = Path(__file__).resolve().parent
 RESTART_MODULE_ANCHOR = 'fn("RestartContinuation.continueRestartedRun")'
 SESSION_MODULE_ANCHOR = 'fn("SessionStore.verify")'
+CODEX_MARKER = "// t3code-anywhere power recovery: restart continuations say continue"
+CONTINUE_INPUT = '[{ type: "text", text: "continue" }]'
+# How a Codex turn starts, per layout: upstream gives a restart continuation no input, which
+# Codex rejects; the repair sends the text "continue".
+CODEX_TURN_STARTS = (
+    # Through 0.1.10: only a restart continuation is a continuation.
+    ("yield* startNativeTurn(turnInput, turnInput.restartContinuationOfRunId === void 0 ? yield* toCodexInput(turnInput) : []);",
+     "yield* startNativeTurn(turnInput, turnInput.restartContinuationOfRunId === void 0 ? yield* toCodexInput(turnInput) : "
+     + CONTINUE_INPUT + ");"),
+    # 0.1.11-nightly.20261119.4928: a resumed turn is a continuation too and keeps upstream's input.
+    ("yield* startNativeTurn(turnInput, !continuation ? yield* toCodexInput(turnInput) : []);",
+     "yield* startNativeTurn(turnInput, !continuation ? yield* toCodexInput(turnInput) : "
+     "turnInput.restartContinuationOfRunId !== void 0 ? " + CONTINUE_INPUT + " : []);"),
+)
 PAIRED_SESSION_HELPER = (
     SESSION_MARKER + "\n"
     "// Pairing mode: a device paired now keeps its session until it is revoked.\n"
@@ -54,14 +76,29 @@ def replace_one(source, old, new):
     return source.replace(old, new, 1)
 
 
+def starts_codex_turns(source):
+    return CODEX_MARKER in source or any(old in source for old, _ in CODEX_TURN_STARTS)
+
+
+def patch_codex(source):
+    """A restart continuation reaches Codex as the text "continue"."""
+    if CODEX_MARKER in source:
+        return source
+    for old, new in CODEX_TURN_STARTS:
+        if source.count(old) == 1:
+            source = source.replace(old, new, 1)
+            # The marker goes first, after a shebang (the 20261119 chunk is the server's entry).
+            shebang, rest = (source.split("\n", 1) if source.startswith("#!") else ("", source))
+            return (shebang + "\n" if shebang else "") + CODEX_MARKER + "\n" + rest
+    raise ValueError("unsupported bundle: expected one Codex turn start for restart continuations, found 0")
+
+
 def patch_bundle(source, helper):
+    """The restart-continuation chunk; also its Codex turn start where the two share a chunk."""
     if MARKER in source:
         return source
-    source = replace_one(
-        source,
-        "yield* startNativeTurn(turnInput, turnInput.restartContinuationOfRunId === void 0 ? yield* toCodexInput(turnInput) : []);",
-        'yield* startNativeTurn(turnInput, turnInput.restartContinuationOfRunId === void 0 ? yield* toCodexInput(turnInput) : [{ type: "text", text: "continue" }]);',
-    )
+    if starts_codex_turns(source):
+        source = patch_codex(source)
     source = replace_one(source, f"const CONTINUE_PROMPT = {json.dumps(OLD_CONTINUE_PROMPT)};",
                          'const CONTINUE_PROMPT = "continue";')
     anchor = 'const continueRestartedRun = fn("RestartContinuation.continueRestartedRun")(function* (input) {\n'
@@ -86,10 +123,11 @@ def patch_bundle(source, helper):
         lambda _: f'{tap}((cause) => willRetry || t3RecoveryWaiting("provider-runtime.continue", cause) '
                   f'? {void} : threads.recoverDelegatedTask(effect.threadId, {run}))',
         source, count=1)
+    # 20261119 added conditions after the attempt check; the wait goes right after it.
     source = replace_one(
         source,
-        "effect.attemptCount >= maxAttempts ? yield* outbox.fail({",
-        "effect.attemptCount >= maxAttempts && !t3RecoveryWaiting(effect.request.type, error) ? yield* outbox.fail({",
+        "effect.attemptCount >= maxAttempts ",
+        "effect.attemptCount >= maxAttempts && !t3RecoveryWaiting(effect.request.type, error) ",
     )
     source = replace_one(
         source,
@@ -145,6 +183,18 @@ def find_module(archive, header, base, anchor, what):
 def restart_module(archive, header, base):
     """Return the one server module that owns the restart continuation."""
     return find_module(archive, header, base, RESTART_MODULE_ANCHOR, "the restart continuation")
+
+
+def codex_module(archive, header, base, restart):
+    """The one server module that starts Codex turns: the restart module itself before 20261119."""
+    if starts_codex_turns(read_member(archive, header, base, restart).decode()):
+        return restart
+    found = [name for name, entry in entries(header)
+             if name.startswith("apps/server/dist/") and name.endswith(".mjs") and "offset" in entry
+             and not entry.get("unpacked") and starts_codex_turns(read_member(archive, header, base, name).decode())]
+    if len(found) != 1:
+        raise ValueError(f"unsupported AppImage: expected one server module that starts Codex turns, found {len(found)}")
+    return found[0]
 
 
 def session_module(archive, header, base):
@@ -304,15 +354,20 @@ def build(app, state, identity, record, record_path, failed_path, found, pairing
             version = json.loads(read_member(archive, header, base, "package.json"))["version"]
             found["version"] = version
             name = restart_module(archive, header, base)
+            codex = codex_module(archive, header, base, name)
             sessions = session_module(archive, header, base) if pairing else None
             originals_by_module = {module: read_member(archive, header, base, module).decode()
-                                   for module in {name, sessions} - {None}}
+                                   for module in {name, codex, sessions} - {None}}
             if any(SESSION_MARKER in source for source in originals_by_module.values()):
                 raise ValueError("already repaired AppImage without matching installation record")
             patched_by_module = dict(originals_by_module)
+            if codex != name and CODEX_MARKER in originals_by_module[codex]:
+                raise ValueError("already repaired AppImage without matching installation record")
             patched_by_module[name] = patch_bundle(patched_by_module[name], helper)
             if patched_by_module[name] == originals_by_module[name]:
                 raise ValueError("already repaired AppImage without matching installation record")
+            if codex != name:
+                patched_by_module[codex] = patch_codex(patched_by_module[codex])
             if pairing:
                 patched_by_module[sessions] = patch_sessions(patched_by_module[sessions])
             # Use the bundled Node runtime; no npm dependency or live T3 state.
@@ -363,15 +418,94 @@ def build(app, state, identity, record, record_path, failed_path, found, pairing
             record = {
                 "patchLevel": PATCH_LEVEL, "version": version,
                 "originalSha256": original_sha, "installedSha256": repaired_sha,
-                "backup": str(backup), "installedAt": now(), "module": name,
+                "backup": str(backup), "installedAt": now(), "module": name, "codexModule": codex,
                 "pairingMode": pairing, "sessionModule": sessions,
                 "identity": [stamp.st_ino, stamp.st_size, stamp.st_mtime_ns],
             }
             write_json(record_path, record)
             failed_path.unlink(missing_ok=True)
+            prune_originals(originals, backup)
             return record
         finally:
             log.close()
+
+
+PORT_RETRY_SECONDS = 600
+
+
+def port_message(failed, checkout):
+    return f"""The T3 Code AppImage on this PC updated to {failed.get('appVersion') or 'a new build'}, and the power-recovery repair refused it:
+
+{failed.get('error')}
+
+So T3 now runs without the repair: after a power cut, restart continuations do not wait for the internet. Port the repair to this build, unattended:
+
+1. The helper is {checkout}/linux/power-recovery.py (with power-recovery.js); its tests are {checkout}/tests/test_power_recovery.py. Extract the current AppImage (~/Applications/T3-Code.AppImage --appimage-extract resources/app.asar, in a scratch folder) and find where the refused code went. Keep every older layout working; add the new one to the tests' layouts.
+2. Run python3 -m unittest discover -s {checkout}/tests.
+3. Install the two helper files into ~/.local/lib/t3code-power-recovery/ (as linux/install.sh does) and apply it: python3 ~/.local/lib/t3code-power-recovery/power-recovery.py. Then python3 ~/.local/lib/t3code-power-recovery/power-recovery.py --status must report "ok": true.
+4. Commit in {checkout} and push it to every remote it has.
+
+Do not restart or quit T3: the repaired AppImage takes effect at its next start, which is what a power cut causes. If the new code no longer has an equivalent of a step, stop and explain instead of guessing."""
+
+
+def request_port(app, state):
+    """A build this helper refuses: start one T3 thread on this machine that ports it.
+
+    Once per refused build and helper version; retried every 10 minutes while T3 is not
+    up yet (the watcher repairs before it launches T3). Needs the source checkout recorded
+    at install time (`source` beside the helper) and the t3 command."""
+    if (state / "no-auto-port").exists():
+        return None
+    try:
+        failed = json.loads((state / "failed.json").read_text())
+        stamp = app.stat()
+    except (FileNotFoundError, ValueError):
+        return None
+    if failed.get("identity") != [stamp.st_ino, stamp.st_size, stamp.st_mtime_ns]:
+        return None
+    request_path = state / "port-request.json"
+    try:
+        request = json.loads(request_path.read_text())
+    except (FileNotFoundError, ValueError):
+        request = {}
+    same = request.get("identity") == failed["identity"] and request.get("helperSha256") == failed.get("helperSha256")
+    if same and (request.get("thread") or time.time() - request.get("attemptedAt", 0) < PORT_RETRY_SECONDS):
+        return request
+    try:
+        checkout = Path(os.environ.get("T3CODE_ANYWHERE_CHECKOUT") or (HERE / "source").read_text().strip())
+    except FileNotFoundError:
+        return None
+    t3 = shutil.which("t3") or next((str(p) for p in (Path.home() / ".local/bin/t3", Path.home() / ".t3/bin/t3")
+                                      if p.exists()), None)
+    if not t3 or not (checkout / "linux/power-recovery.py").exists():
+        return None
+    request = {"identity": failed["identity"], "helperSha256": failed.get("helperSha256"),
+               "appVersion": failed.get("appVersion"), "attemptedAt": time.time(), "thread": None}
+    try:
+        result = subprocess.run(
+            [t3, "thread", "start", str(checkout), "-", "--json",
+             "--title", f"Port T3 power recovery to {failed.get('appVersion') or 'the new build'}"],
+            input=port_message(failed, checkout), capture_output=True, text=True, timeout=60)
+        if result.returncode == 0:
+            try:
+                answer = json.loads(result.stdout)
+                request["thread"] = answer.get("threadId") or answer.get("id") or result.stdout.strip()[:80]
+            except ValueError:
+                request["thread"] = result.stdout.strip()[:80]
+            request["requestedAt"] = now()
+        else:
+            request["error"] = (result.stderr or result.stdout).strip()[-300:]
+    except (OSError, subprocess.TimeoutExpired) as error:
+        request["error"] = str(error)[:300]
+    write_json(request_path, request)
+    return request
+
+
+def prune_originals(originals, keep):
+    """Only the installed build's original is needed (a newer helper rebuilds from it)."""
+    for path in originals.glob("*.AppImage"):
+        if path != keep:
+            path.unlink(missing_ok=True)
 
 
 def status(app, state):
@@ -394,8 +528,13 @@ def status(app, state):
         failed = json.loads((state / "failed.json").read_text())
     except FileNotFoundError:
         failed = None
+    try:
+        port = json.loads((state / "port-request.json").read_text())
+    except (FileNotFoundError, ValueError):
+        port = None
     result.update(currentIdentity=identity, currentAppMatches=matches, failed=failed,
                   failedForCurrentApp=failed is not None and failed.get("identity") == identity,
+                  portRequest=port if port and port.get("identity") == identity else None,
                   ok=matches and result.get("patchLevel") == PATCH_LEVEL)
     return result
 
@@ -417,8 +556,12 @@ def main():
             (args.state / "pairing-mode").unlink(missing_ok=True)
     if args.status:
         print(json.dumps(status(args.app, args.state), indent=2))
-    else:
+        return
+    try:
         print(json.dumps(apply(args.app.resolve(), args.state)))
+    except ValueError:
+        request_port(args.app.resolve(), args.state)
+        raise
 
 
 if __name__ == "__main__":

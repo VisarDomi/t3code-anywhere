@@ -8,6 +8,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("power_recovery", ROOT / "linux/power-recovery.py")
@@ -47,6 +48,30 @@ OBJECT_RUN_FIXTURE = SPLIT_FIXTURE.replace("recoverDelegatedTask(effect.threadId
                                            "recoverDelegatedTask(effect.threadId, { sourceRunId })")
 LAYOUTS = {"0.1.7-nightly.20261101.4016": FIXTURE, "0.1.8-nightly.20261109.4399": SPLIT_FIXTURE,
            "0.1.10-nightly.20261112.4580": OBJECT_RUN_FIXTURE}
+
+# 0.1.11-nightly.20261119.4928 moved the Codex adapter into its own chunk
+# (apps/server/dist/server-*.mjs), where a resumed turn counts as a continuation too, and
+# added conditions to the retry exhaustion check.
+ADAPTER_START = OBJECT_RUN_FIXTURE.index("const adapter = {")
+ADAPTER_END = OBJECT_RUN_FIXTURE.index("const continueRestartedRun")
+CODEX_CHUNK_FIXTURE = '''#!/usr/bin/env node
+import { x as gen$1 } from "./Effect.mjs";
+const startNativeTurn = fn("CodexAdapterV2.startNativeTurn")(function* (turnInput, codexInput) {});
+const adapter = {
+startTurn: (turnInput) => {
+ const continuation = turnInput.restartContinuationOfRunId !== void 0 || turnInput.resume === true;
+ const goalCommand = !continuation ? parseGoalCommand(turnInput.message) : null;
+ if (goalCommand !== null) return runGoalCommand(turnInput, goalCommand);
+ return gen$1(function* () {
+ yield* startNativeTurn(turnInput, !continuation ? yield* toCodexInput(turnInput) : []);
+ }).pipe(mapError((cause) => cause));
+},
+steerTurn: () => {},
+};
+'''
+RESTART_CHUNK_FIXTURE = (OBJECT_RUN_FIXTURE[:ADAPTER_START] + OBJECT_RUN_FIXTURE[ADAPTER_END:]).replace(
+    "effect.attemptCount >= maxAttempts ? yield* outbox.fail({});",
+    "effect.attemptCount >= maxAttempts && (!ownsStartingRun(effect.request.type) || cannotSettleRun(exit$1.cause)) ? yield* outbox.fail({});")
 
 # The session code of 0.1.8-nightly.20261109.4433 (apps/server/dist/relayTracing-*.mjs),
 # with unrelated module code omitted.
@@ -107,6 +132,44 @@ const run = () => adapter.startTurn({restartContinuationOfRunId:'cut-run', messa
                        if repaired else "assert.throws(run, /EmptyInput/);")
             script += "adapter.startTurn({message:{text:'normal user input'}}).next(); assert.equal(received[0].text, 'normal user input');"
             node(script)
+
+    def test_codex_chunk_of_20261119_says_continue_only_for_restart_continuations(self):
+        self.assertFalse(repair.starts_codex_turns(RESTART_CHUNK_FIXTURE))
+        patched = repair.patch_codex(CODEX_CHUNK_FIXTURE)
+        self.assertEqual(repair.patch_codex(patched), patched)
+        self.assertTrue(patched.startswith("#!/usr/bin/env node\n" + repair.CODEX_MARKER + "\n"))  # the shebang stays first
+        for source, repaired in ((CODEX_CHUNK_FIXTURE, False), (patched, True)):
+            block = source[source.index("const adapter = {"):]
+            script = '''
+import assert from 'node:assert/strict';
+function gen$1(f) { return { pipe() { return f(); } }; }
+function mapError(f) { return f; }
+function parseGoalCommand() { return null; }
+function* toCodexInput(input) { return [{type:'text', text:input.message.text}]; }
+let received;
+function* startNativeTurn(input, items) { received = items; }
+''' + block + '''
+adapter.startTurn({restartContinuationOfRunId:'cut-run', message:{text:'x'}}).next();
+const restart = received;
+adapter.startTurn({resume:true, message:{text:'x'}}).next();
+assert.deepEqual(received, []);
+adapter.startTurn({message:{text:'normal user input'}}).next();
+assert.equal(received[0].text, 'normal user input');
+'''
+            script += ("assert.deepEqual(restart, [{type:'text', text:'continue'}]);" if repaired
+                       else "assert.deepEqual(restart, []);")
+            node(script)
+        with self.assertRaisesRegex(ValueError, "Codex turn start"):
+            repair.patch_codex("const nothing = 1;")
+
+    def test_restart_chunk_of_20261119_keeps_its_new_exhaustion_conditions(self):
+        patched = repair.patch_bundle(RESTART_CHUNK_FIXTURE, HELPER)
+        self.assertNotIn(repair.CODEX_MARKER, patched)
+        self.assertIn("effect.attemptCount >= maxAttempts && !t3RecoveryWaiting(effect.request.type, error) "
+                      "&& (!ownsStartingRun(effect.request.type) || cannotSettleRun(exit$1.cause)) ? yield* outbox.fail",
+                      patched)
+        self.assertIn("yield* tryPromise({ try: t3RecoveryWaitForInternet", patched)
+        self.assertIn('const CONTINUE_PROMPT = "continue";', patched)
 
     def test_both_layouts_receive_the_same_semantic_patch(self):
         for version, fixture in LAYOUTS.items():
@@ -175,8 +238,12 @@ assert.equal(calls, 2);
         for fixture in LAYOUTS.values():
             patched = repair.patch_bundle(fixture, HELPER)
             self.assertEqual(repair.patch_bundle(patched, HELPER), patched)
+            changed = fixture.replace(" : []);", " : [different]);")
+            # Unrecognised Codex code is no longer this chunk's: the AppImage then has no module
+            # that starts Codex turns (codex_module), and patch_codex refuses it.
+            self.assertFalse(repair.starts_codex_turns(changed))
             with self.assertRaises(ValueError):
-                repair.patch_bundle(fixture.replace(" : []);", " : [different]);"), HELPER)
+                repair.patch_codex(changed)
             with self.assertRaises(ValueError):
                 repair.patch_bundle(fixture + fixture, HELPER)
             with self.assertRaises(ValueError):
@@ -254,10 +321,17 @@ assert.equal(calls, 2);
                       "apps/server/dist/runtimeLayer-C.mjs": SPLIT_FIXTURE.encode(),
                       "apps/web/dist/x.mjs": SPLIT_FIXTURE.encode()},
         }
-        expected = {"single": "apps/server/dist/binCli-A.mjs", "split": "apps/server/dist/runtimeLayer-C.mjs"}
+        layouts["codex-chunk"] = {"apps/server/dist/runtimeLayer-D.mjs": RESTART_CHUNK_FIXTURE.encode(),
+                                  "apps/server/dist/server-E.mjs": CODEX_CHUNK_FIXTURE.encode()}
+        expected = {"single": "apps/server/dist/binCli-A.mjs", "split": "apps/server/dist/runtimeLayer-C.mjs",
+                    "codex-chunk": "apps/server/dist/runtimeLayer-D.mjs"}
+        codex = dict(expected, **{"codex-chunk": "apps/server/dist/server-E.mjs"})
         for layout, files in layouts.items():
             with tempfile.TemporaryDirectory() as directory:
-                self.assertEqual(repair.restart_module(*archive(directory, files)), expected[layout])
+                found = archive(directory, files)
+                restart = repair.restart_module(*found)
+                self.assertEqual(restart, expected[layout])
+                self.assertEqual(repair.codex_module(*found, restart), codex[layout])
         with tempfile.TemporaryDirectory() as directory:
             twice = {"apps/server/dist/a.mjs": FIXTURE.encode(), "apps/server/dist/b.mjs": FIXTURE.encode()}
             with self.assertRaises(ValueError):
@@ -290,6 +364,44 @@ assert.equal(calls, 2);
             self.assertFalse(report["currentAppMatches"])
             self.assertTrue(report["failedForCurrentApp"])
             self.assertFalse(report["ok"])
+
+    def test_a_refused_build_starts_one_porting_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            app, state, bin_dir = directory / "T3-Code.AppImage", directory / "state", directory / "bin"
+            app.write_text("#!/bin/sh\nexit 1\n")
+            app.chmod(0o755)
+            bin_dir.mkdir()
+            calls, message = directory / "calls", directory / "message"
+            (bin_dir / "t3").write_text(f'#!/bin/sh\necho "$@" >> {calls}\ncat > {message}\n'
+                                        'echo \'{"threadId":"thread-1"}\'\n')
+            (bin_dir / "t3").chmod(0o755)
+            with self.assertRaises(Exception):
+                repair.apply(app, state)
+            env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "T3CODE_ANYWHERE_CHECKOUT": str(ROOT)}
+            with unittest.mock.patch.dict(os.environ, env):
+                self.assertEqual(repair.request_port(app, state)["thread"], "thread-1")
+                self.assertEqual(repair.request_port(app, state)["thread"], "thread-1")  # once per build
+            self.assertEqual(len(calls.read_text().splitlines()), 1)
+            self.assertIn(f"thread start {ROOT} - --json --title Port T3 power recovery", calls.read_text())
+            text = message.read_text()
+            self.assertIn("Do not restart or quit T3", text)
+            self.assertIn(str(ROOT / "linux/power-recovery.py"), text)
+            self.assertEqual(repair.status(app, state)["portRequest"]["thread"], "thread-1")
+            (state / "port-request.json").unlink()
+            (state / "no-auto-port").touch()
+            with unittest.mock.patch.dict(os.environ, env):
+                self.assertIsNone(repair.request_port(app, state))
+            self.assertEqual(len(calls.read_text().splitlines()), 1)
+
+    def test_only_the_installed_builds_original_is_kept(self):
+        with tempfile.TemporaryDirectory() as directory:
+            originals = Path(directory)
+            keep = originals / "current.AppImage"
+            for name in ("old-1.AppImage", "old-2.AppImage", "current.AppImage", "notes.txt"):
+                (originals / name).write_text(name)
+            repair.prune_originals(originals, keep)
+            self.assertEqual(sorted(p.name for p in originals.iterdir()), ["current.AppImage", "notes.txt"])
 
     def test_status_is_read_only_and_matches_the_installed_identity(self):
         with tempfile.TemporaryDirectory() as directory:

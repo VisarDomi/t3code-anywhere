@@ -43,20 +43,22 @@ if name=='networksetup':
                 subprocess.run(['/bin/sh',str(test_script)],env=env,check=True,capture_output=True,timeout=8)
             return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
-    def away_rules(self, extra=''):
-        """The packet-filter rules written away from home, with pfctl replaced by a recorder."""
+    def away_rules(self, extra='', anchor='t3code-lan'):
+        """The packet-filter rules written to an anchor away from home, with pfctl replaced by a recorder."""
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory); commands=root/'bin';commands.mkdir()
             conf=root/'config';rules=root/'rules'
             conf.write_text('ROUTER=192.168.1.1\nROUTER_MAC=aa:bb:cc:dd:ee:ff\nT3_LAN=yes\n'+extra)
-            (commands/'pfctl').write_text('#!/bin/sh\ncase "$*" in *"-f -"*) cat > "$RULES";; *"-s info"*) echo "Status: Enabled";; esac\n')
+            (commands/'pfctl').write_text('#!/bin/sh\nname=; prev=; for a in "$@"; do [ "$prev" = -a ] && name=${a##*.}; prev=$a; done\n'
+                                          'case "$*" in *"-f -"*) cat > "$RULES.$name";; *"-s info"*) echo "Status: Enabled";; esac\n')
             (commands/'ping').write_text('#!/bin/sh\nexit 1\n')
             (commands/'logger').write_text('#!/bin/sh\n')
             for command in commands.iterdir(): command.chmod(0o755)
             script=root/'policy';script.write_text(SCRIPT.read_text().replace('conf=/usr/local/etc/home-network.conf',f'conf={conf}'))
             subprocess.run(['/bin/sh',str(script)],env=dict(os.environ,PATH=str(commands)+os.pathsep+os.environ['PATH'],RULES=str(rules)),
                            check=True,capture_output=True,timeout=8)
-            return rules.read_text().splitlines()
+            loaded = Path(f'{rules}.{anchor}')
+            return loaded.read_text().splitlines() if loaded.exists() else None
 
     def test_away_from_home_only_loopback_and_the_tailnet_reach_t3(self):
         rules=self.away_rules()
@@ -68,6 +70,12 @@ if name=='networksetup':
         rules=self.away_rules('TAILNET=no\n')
         self.assertEqual(rules,['pass in quick on lo0 proto tcp to any port 3773:3799',
                                 'block drop in quick proto tcp to any port 3773:3799'])
+
+    def test_tailnet_no_keeps_t3_off_tailscale_both_ways(self):
+        self.assertEqual(self.away_rules('TAILNET=no\n', anchor='t3code-tailnet'),
+                         ['block return in quick proto tcp from { 100.64.0.0/10, fd7a:115c:a1e0::/48 } to any port 3773:3799',
+                          'block return out quick proto tcp from any to { 100.64.0.0/10, fd7a:115c:a1e0::/48 } port 3773:3799'])
+        self.assertIsNone(self.away_rules(anchor='t3code-tailnet'))  # T3 over Tailscale stays allowed by default
 
     def test_live_home_gateway_keeps_fixed_address(self):
         self.assertEqual(self.run_policy(),[])

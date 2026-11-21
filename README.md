@@ -89,10 +89,12 @@ handling. This repairs boot/restart recovery; it does not change retry policy fo
 arbitrary failures in a running turn. The automatic continuation input is `continue`.
 
 This is a local AppImage repair, verified against
-`0.1.7-nightly.20261101.4016` (single `binCli-*.mjs` server bundle) and
-`0.1.8-nightly.20261109.4399` (code-split; the code is in `runtimeLayer-*.mjs`),
+`0.1.7-nightly.20261101.4016` (single `binCli-*.mjs` server bundle),
+`0.1.8-nightly.20261109.4399` (code-split; the code is in `runtimeLayer-*.mjs`) and
+`0.1.11-nightly.20261119.4928` (the Codex adapter in its own `server-*.mjs`),
 rather than an upstream release. The helper patches the one server module that
-defines the restart continuation. All changed bundle anchors must match exactly;
+defines the restart continuation and the one that starts Codex turns (the same module
+before 20261119). All changed bundle anchors must match exactly;
 otherwise the helper leaves the app untouched and records the refusal. The original AppImage, hashes and installation record are in
 `~/.local/share/t3code-power-recovery/`. ASAR file offsets and SHA-256 integrity
 metadata are rebuilt, and the replacement app is verified before an atomic swap.
@@ -106,6 +108,16 @@ does not prevent the original app from opening. `failed.json` records the refuse
 AppImage identity, `appVersion`, `error`, `at` and the helper's `helperSha256`; an
 updated helper therefore retries a bundle that an older helper refused. This helper does not modify a
 signed macOS app or a headless T3 installation.
+
+A refused build is ported automatically. The refusal starts one T3 thread on the same
+machine (`t3 thread start` in the source checkout the installer recorded in
+`~/.local/lib/t3code-power-recovery/source`, titled "Port T3 power recovery to
+VERSION") that finds where the refused code went, extends the helper and its tests,
+installs and applies it, checks `--status` and commits, without restarting T3. It runs
+once per refused build and helper version, and is retried every 10 minutes while T3 is
+not up yet; `port-request.json` in the repair directory records it and `--status` shows
+it as `portRequest`. `touch ~/.local/share/t3code-power-recovery/no-auto-port` turns
+this off. Only the installed build's original AppImage is kept.
 
 ### Pairing mode: devices that stay signed in
 
