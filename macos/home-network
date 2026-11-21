@@ -13,8 +13,11 @@
 #                       Tailscale, while other networks (a coffee shop's Wi-Fi) are kept
 #                       out by the packet filter. Tailscale and loopback (where Tailscale
 #                       Serve delivers) always pass. Closed until home is confirmed.
-#   TAILNET=no          A Mac without Tailscale: away from home only loopback passes. Some
-#                       public networks hand out 100.64.0.0/10 addresses themselves.
+#   TAILNET=no          T3 never uses this Mac's Tailscale (absent, or kept for something
+#                       else such as remote desktop): T3's ports are closed to and from
+#                       Tailscale addresses everywhere, and away from home only loopback
+#                       passes. Some public networks hand out 100.64.0.0/10 addresses
+#                       themselves.
 #   SERVICE=Wi-Fi IFACE=en0 HOME_IP=192.168.1.50
 #                       A fixed Wi-Fi address only at home, DHCP elsewhere: macOS applies
 #                       a service's address on every network, so a laptop with a fixed
@@ -27,6 +30,8 @@ conf=/usr/local/etc/home-network.conf
 GRACE=30                               # seconds away before the Wi-Fi switches to DHCP
 MISS=/var/run/home-network.miss
 ANCHOR=com.apple/local.t3code-lan      # evaluated by macOS's default `anchor "com.apple/*"`
+TAILNET_ANCHOR=com.apple/local.t3code-tailnet
+TAILNETS="{ 100.64.0.0/10, fd7a:115c:a1e0::/48 }"
 PORTS=3773:3799                        # T3 starts at 3773 and moves up when it is taken
 
 log() { logger -t home-network "$*"; }
@@ -50,6 +55,16 @@ if [ "${T3_LAN:-no}" = yes ]; then
             echo "block drop in quick proto tcp to any port $PORTS"
         } | pfctl -a "$ANCHOR" -f - >/dev/null 2>&1 && log "away: T3 Code closed to the LAN"
     fi
+fi
+
+# TAILNET=no: T3 neither serves nor connects over Tailscale, at home or away. A T3 app that once
+# saved a peer's Tailscale route then fails it at once and takes its next route.
+if [ "${TAILNET:-yes}" = no ] && ! pfctl -a "$TAILNET_ANCHOR" -s rules 2>/dev/null | grep -q '^block'; then
+    pfctl -s info 2>/dev/null | grep -q 'Status: Enabled' || pfctl -E >/dev/null 2>&1
+    {
+        echo "block return in quick proto tcp from $TAILNETS to any port $PORTS"
+        echo "block return out quick proto tcp from any to $TAILNETS port $PORTS"
+    } | pfctl -a "$TAILNET_ANCHOR" -f - >/dev/null 2>&1 && log "T3 Code closed to Tailscale"
 fi
 
 [ -n "${HOME_IP:-}" ] || return 0
