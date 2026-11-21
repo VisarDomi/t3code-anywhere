@@ -6,13 +6,14 @@ Read README.md, ROAMING.md and the relevant linux/, macos/ or tools/ script befo
 Discover existing hosts, pinned identities, credentials and routes before asking
 the owner. Stable is default for new setups; preserve the chosen track everywhere.
 
-## This owner's machines since 2026-11-12
+## This owner's machines
 
-Tailscale is removed from the owner's PC, Mac and phone at the owner's request: never reinstall
-or re-enable it there, and do not "repair" a missing tailnet. T3 away from home goes through the
-owner's own relay with sessions paired in pairing mode (README, "Pairing mode"); the values are in the
-private environment repo (`t3code/README.md`). The Tailscale wording below describes the
-general project and other installations.
+T3 on the owner's machines does not use Tailscale: away from home it goes through the owner's own
+relay, with sessions paired in pairing mode (README, "Pairing mode"); the values are in the private
+environment repo (`t3code/README.md`, `WHERE.md`). The PC and the Mac run Tailscale for one other
+purpose, remote desktop; leave it alone, never enable T3's Tailscale HTTPS or `tailscale serve`
+there, and never add a tailnet route to T3. The Tailscale wording below describes the general
+project and other installations.
 
 ## Invariants
 
